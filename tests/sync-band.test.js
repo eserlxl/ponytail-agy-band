@@ -2039,6 +2039,21 @@ test('Chain A regressions: empty brainDirs, non-object JSON recovery, child CSV 
   const projCsv = fs.readFileSync(path.join(ledgerDir, 'dedup-proj.csv'), 'utf8');
   assert.equal(projCsv.includes('bbbb2222-'), false);
 
+  // Live parent Stop must also remove prior standalone child Stop CSV row without requiring --import.
+  const stopDedupLedger = path.join(tmp, 'stop-dedup-band');
+  handleHookPayload(
+    { hookEventName: 'Stop', conversationId: childId, transcriptPath: childPath },
+    { ledgerDir: stopDedupLedger, ponytailDir, allowTempWorkspaces: true },
+  );
+  assert.ok(fs.existsSync(path.join(stopDedupLedger, 'antigravity.csv')));
+  handleHookPayload(
+    { hookEventName: 'Stop', conversationId: parentId, transcriptPath: parentPath },
+    { ledgerDir: stopDedupLedger, ponytailDir, allowTempWorkspaces: true },
+  );
+  assert.equal(fs.existsSync(path.join(stopDedupLedger, 'antigravity.csv')), false, 'parent Stop should remove child fallback CSV');
+  assert.equal(rebuildBoardHtml(stopDedupLedger, ponytailDir).totalTasks, 1);
+  assert.equal(fs.readFileSync(path.join(stopDedupLedger, 'dedup-proj.csv'), 'utf8').includes('bbbb2222-'), false);
+
   // 4. withLedgerLock releases on throw, preserves replaced .agy-band.lock token, and ignores invalid PONYTAIL_LOCK_TIMEOUT_MS.
   const lockLedger = path.join(tmp, 'lock-band');
   fs.mkdirSync(lockLedger, { recursive: true });
