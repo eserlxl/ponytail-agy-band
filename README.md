@@ -49,11 +49,13 @@ node --no-warnings ~/.gemini/config/plugins/ponytail-agy-band/hooks/sync-band.js
 | Option / Variable | Description |
 | :--- | :--- |
 | `--import` | Scan all `agy` brain directories and rebuild `~/.config/ponytail/band/board.html` |
+| `--status` | Inspect discovered brain directories, ledger CSVs, and board mode without modifying disk state |
+| `-h`, `--help` | Print CLI usage summary and exit `0` |
 | `--brain-dir <path>` | Override brain directories to scan (repeatable) |
 | `--ledger-dir <path>` | Override target CSV + `board.html` directory |
 | `--ponytail-dir <path>` | Override installed Ponytail plugin directory |
 | `--project <name>` | Filter `--import` to a specific project basename (repeatable, case-insensitive) |
-| `--json` | Emit `--import` summary as single-line JSON on stdout |
+| `--json` | Emit `--import` or `--status` summary as single-line JSON on stdout |
 | `PONYTAIL_BAND_DIR` | Default ledger directory override (otherwise `$XDG_CONFIG_HOME/ponytail/band`) |
 | `PONYTAIL_PLUGIN_DIR` | Installed Ponytail plugin directory override |
 | `PONYTAIL_AGY_BRAIN_DIRS` | Delimiter-separated (`:` / `;`) brain directory paths used by default `--import` scans |

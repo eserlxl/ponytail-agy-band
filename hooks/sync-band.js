@@ -1264,6 +1264,66 @@ function collectDescendants(rootId, getChildren) {
   return out;
 }
 
+/** Discover deduplicated Antigravity session transcripts across brain directories without mutating disk state. */
+function collectBrainSessions(brainDirs = defaultBrainDirs()) {
+  const sessions = new Map();
+  for (const brainDir of brainDirs) {
+    let ids = [];
+    try {
+      ids = fs.readdirSync(brainDir);
+    } catch {
+      continue;
+    }
+    for (const id of ids) {
+      const logsDir = path.join(brainDir, id, '.system_generated', 'logs');
+      const full = path.join(logsDir, 'transcript_full.jsonl');
+      const compact = path.join(logsDir, 'transcript.jsonl');
+      const transcriptPath = fs.existsSync(full) ? full : fs.existsSync(compact) ? compact : null;
+      if (!transcriptPath) continue;
+      let mtimeMs = 0;
+      try {
+        mtimeMs = fs.statSync(transcriptPath).mtimeMs;
+      } catch {
+        continue;
+      }
+      const prev = sessions.get(id);
+      if (!prev || mtimeMs > prev.mtimeMs) {
+        sessions.set(id, { id, brainDir, transcriptPath, mtimeMs });
+      }
+    }
+  }
+  return [...sessions.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** Inspect configured brain directories, ledger files, and board mode without creating files or directories. */
+function inspectBandStatus(options = {}) {
+  const brainDirs = Array.isArray(options.brainDirs) && options.brainDirs.length > 0
+    ? options.brainDirs
+    : defaultBrainDirs();
+  const sessions = collectBrainSessions(brainDirs);
+  const ledgerDir = options.ledgerDir || defaultLedgerDir();
+  let csvFiles = [];
+  try {
+    if (fs.existsSync(ledgerDir) && fs.statSync(ledgerDir).isDirectory()) {
+      csvFiles = fs.readdirSync(ledgerDir).filter(f => f.endsWith('.csv')).sort();
+    }
+  } catch {}
+  const candidatePonytailDir = options.ponytailDir || defaultPonytailDir();
+  const hasPonytailBoard = Boolean(
+    candidatePonytailDir &&
+    fs.existsSync(path.join(candidatePonytailDir, 'hooks', 'band', 'board.ts')) &&
+    fs.existsSync(path.join(candidatePonytailDir, 'hooks', 'band', 'logo.ts')),
+  );
+  return {
+    brainDirs,
+    conversationCount: sessions.length,
+    ledgerDir,
+    csvFiles,
+    ponytailDir: hasPonytailBoard ? candidatePonytailDir : null,
+    boardMode: hasPonytailBoard ? 'ponytail' : 'standalone',
+  };
+}
+
 function importAllBrains(options = {}) {
   const ledgerDir = options.ledgerDir || defaultLedgerDir();
   const ponytailDir = options.ponytailDir || defaultPonytailDir();
@@ -1278,32 +1338,7 @@ function importAllBrains(options = {}) {
 
   const metaCachePath = path.join(ledgerDir, '.agy-sessions.json');
   const sessionMeta = readJsonSafe(metaCachePath, {});
-  const sessions = new Map();
-
-  for (const brainDir of brainDirs) {
-    let ids = [];
-    try {
-      ids = fs.readdirSync(brainDir);
-    } catch {
-      continue;
-    }
-    for (const id of ids) {
-      const logsDir = path.join(brainDir, id, '.system_generated', 'logs');
-      const full = path.join(logsDir, 'transcript_full.jsonl');
-      const compact = path.join(logsDir, 'transcript.jsonl');
-      const transcriptPath = fs.existsSync(full) ? full : fs.existsSync(compact) ? compact : null;
-      if (!transcriptPath) continue;
-      if (!sessions.has(id)) {
-        sessions.set(id, { id, brainDir, transcriptPath, mtimeMs: fs.statSync(transcriptPath).mtimeMs });
-      } else {
-        const prev = sessions.get(id);
-        const mtimeMs = fs.statSync(transcriptPath).mtimeMs;
-        if (mtimeMs > prev.mtimeMs) {
-          sessions.set(id, { id, brainDir, transcriptPath, mtimeMs });
-        }
-      }
-    }
-  }
+  const sessions = new Map(collectBrainSessions(brainDirs).map(s => [s.id, s]));
 
   // Build parent -> child subagent graph so child conversations roll up into their parent.
   const childToParent = new Map();
@@ -1444,9 +1479,28 @@ function handleHookPayload(payload, options = {}) {
   return event === 'Stop' ? { decision: 'allow' } : {};
 }
 
+const CLI_HELP_TEXT = [
+  'Usage: sync-band.js [options]',
+  '',
+  'Antigravity (agy) telemetry hook and Board importer for Ponytail.',
+  'When run with neither --import nor --status, reads hook JSON from stdin.',
+  '',
+  'Options:',
+  '  --import                Scan agy brain directories, update CSVs, and rebuild board.html',
+  '  --status                Inspect detected brain dirs, ledger CSVs, and board mode (read-only)',
+  '  --brain-dir <path>      Override brain directory to scan (repeatable)',
+  '  --ledger-dir <path>     Override target CSV and board.html directory',
+  '  --ponytail-dir <path>   Override installed Ponytail plugin directory',
+  '  --project <name>        Filter --import to a project basename (repeatable, case-insensitive)',
+  '  --json                  Emit --import or --status output as single-line JSON',
+  '  -h, --help              Show this help text and exit',
+].join('\n');
+
 function parseCliArgs(argv) {
   const opts = {
     importMode: false,
+    statusMode: false,
+    help: false,
     json: false,
     brainDirs: [],
     projects: [],
@@ -1456,6 +1510,8 @@ function parseCliArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--import') opts.importMode = true;
+    else if (a === '--status') opts.statusMode = true;
+    else if (a === '--help' || a === '-h') opts.help = true;
     else if (a === '--json') opts.json = true;
     else if (a === '--brain-dir' && argv[i + 1]) opts.brainDirs.push(argv[++i]);
     else if (a === '--project' && argv[i + 1]) opts.projects.push(argv[++i]);
@@ -1469,6 +1525,27 @@ function parseCliArgs(argv) {
 
 if (require.main === module) {
   const cli = parseCliArgs(process.argv.slice(2));
+  if (cli.help) {
+    process.stdout.write(`${CLI_HELP_TEXT}\n`);
+    process.exit(0);
+  }
+  if (cli.statusMode) {
+    const status = inspectBandStatus(cli);
+    if (cli.json) {
+      process.stdout.write(`${JSON.stringify(status)}\n`);
+    } else {
+      process.stdout.write(
+        [
+          `ponytail-agy-band status:`,
+          `  brainDirs (${status.brainDirs.length}): ${status.brainDirs.join(', ') || '(none)'}`,
+          `  conversations: ${status.conversationCount}`,
+          `  ledgerDir: ${status.ledgerDir} (${status.csvFiles.length} csv file(s))`,
+          `  boardMode: ${status.boardMode}${status.ponytailDir ? ` (${status.ponytailDir})` : ''}`,
+        ].join('\n') + '\n',
+      );
+    }
+    process.exit(0);
+  }
   if (cli.importMode) {
     const res = importAllBrains(cli);
     if (cli.json) {
@@ -1518,11 +1595,13 @@ if (require.main === module) {
 
 module.exports = {
   CSV_HEADER,
+  collectBrainSessions,
   discoverChildIds,
   estimateStepCost,
   formatBoardModel,
   handleHookPayload,
   importAllBrains,
+  inspectBandStatus,
   parseAgyTranscript,
   projectOf,
   rebuildBoardHtml,

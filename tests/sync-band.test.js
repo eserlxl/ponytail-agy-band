@@ -13,10 +13,12 @@ const SYNC_SCRIPT = path.join(PLUGIN_ROOT, 'hooks', 'sync-band.js');
 
 const {
   CSV_HEADER,
+  collectBrainSessions,
   estimateStepCost,
   formatBoardModel,
   handleHookPayload,
   importAllBrains,
+  inspectBandStatus,
   parseAgyTranscript,
   rebuildBoardHtml,
   streamJsonl,
@@ -1370,4 +1372,58 @@ test('handleHookPayload persists customLabel/title and PONYTAIL_AGY_BRAIN_DIRS o
   const csv = fs.readFileSync(path.join(ledgerDir, 'antigravity.csv'), 'utf8');
   assert.ok(csv.includes('Pinned Integration Title'));
   assert.ok(!csv.includes('Ignored prompt name'));
+});
+
+test('CLI --help/-h prints usage and --status reports diagnostics without mutating disk', t => {
+  const tmp = makeTmpDir('pw-agy-help-status-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  for (const flag of ['--help', '-h']) {
+    const helpRes = spawnSync(process.execPath, ['--no-warnings', SYNC_SCRIPT, flag], { encoding: 'utf8' });
+    assert.equal(helpRes.status, 0, helpRes.stderr);
+    assert.match(helpRes.stdout, /--import/);
+    assert.match(helpRes.stdout, /--status/);
+    assert.match(helpRes.stdout, /--project/);
+  }
+
+  const brainDir = path.join(tmp, 'brain');
+  const uncreatedLedger = path.join(tmp, 'band-uncreated');
+  const convId = '55555555-5555-5555-5555-555555555555';
+  const tFile = path.join(brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
+  writeJsonl(tFile, []);
+
+  assert.equal(collectBrainSessions([brainDir]).length, 1);
+
+  const standaloneRes = spawnSync(
+    process.execPath,
+    ['--no-warnings', SYNC_SCRIPT, '--status', '--brain-dir', brainDir, '--ledger-dir', uncreatedLedger, '--ponytail-dir', tmp, '--json'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(standaloneRes.status, 0, standaloneRes.stderr);
+  const st = JSON.parse(standaloneRes.stdout.trim());
+  assert.deepEqual(st.brainDirs, [brainDir]);
+  assert.equal(st.conversationCount, 1);
+  assert.equal(st.ledgerDir, uncreatedLedger);
+  assert.deepEqual(st.csvFiles, []);
+  assert.equal(st.ponytailDir, null);
+  assert.equal(st.boardMode, 'standalone');
+  assert.equal(fs.existsSync(uncreatedLedger), false);
+
+  const ponytailDir = makePonytailFixture(tmp);
+  fs.mkdirSync(uncreatedLedger, { recursive: true });
+  fs.writeFileSync(path.join(uncreatedLedger, 'demo.csv'), `${CSV_HEADER}\n`, 'utf8');
+
+  const humanRes = spawnSync(
+    process.execPath,
+    ['--no-warnings', SYNC_SCRIPT, '--status', '--brain-dir', brainDir, '--ledger-dir', uncreatedLedger, '--ponytail-dir', ponytailDir],
+    { encoding: 'utf8' },
+  );
+  assert.equal(humanRes.status, 0, humanRes.stderr);
+  assert.match(humanRes.stdout, /conversations: 1/);
+  assert.match(humanRes.stdout, /1 csv file\(s\)/);
+  assert.match(humanRes.stdout, /boardMode: ponytail/);
+
+  const direct = inspectBandStatus({ brainDirs: [brainDir], ledgerDir: uncreatedLedger, ponytailDir });
+  assert.deepEqual(direct.csvFiles, ['demo.csv']);
+  assert.equal(direct.boardMode, 'ponytail');
 });
