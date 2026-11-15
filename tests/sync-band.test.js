@@ -1933,3 +1933,166 @@ test('inspectBandStatus, rebuildBoardHtml, and secondary parser/env branches han
   const envParsed = parseAgyTranscript(transcriptPath, {}, [], { ponytailDir: noPonytail });
   assert.equal(envParsed.level, 'ultra');
 });
+
+test('Chain A regressions: empty brainDirs, non-object JSON recovery, child CSV dedup, lock ownership, and CLI --status conflicts', t => {
+  const tmp = makeTmpDir('pw-agy-chain-a-');
+  const prevLockTimeout = process.env.PONYTAIL_LOCK_TIMEOUT_MS;
+  const prevAllowTemp = process.env.PONYTAIL_AGY_ALLOW_TEMP;
+  t.after(() => {
+    if (prevLockTimeout === undefined) delete process.env.PONYTAIL_LOCK_TIMEOUT_MS;
+    else process.env.PONYTAIL_LOCK_TIMEOUT_MS = prevLockTimeout;
+    if (prevAllowTemp === undefined) delete process.env.PONYTAIL_AGY_ALLOW_TEMP;
+    else process.env.PONYTAIL_AGY_ALLOW_TEMP = prevAllowTemp;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const ponytailDir = makePonytailFixture(tmp);
+  const ledgerDir = path.join(tmp, 'band');
+  const brainDir = path.join(tmp, 'brain');
+  const repoDir = path.join(tmp, 'dedup-proj');
+  fs.mkdirSync(repoDir, { recursive: true });
+  spawnSync('git', ['init', repoDir], { stdio: 'ignore' });
+  fs.mkdirSync(ledgerDir, { recursive: true });
+
+  // 1. Corrupt non-object JSON (.agy-sessions.json = null / [], .agy-import-cache.json = {"version":1,"entries":[]})
+  const sessionsPath = path.join(ledgerDir, '.agy-sessions.json');
+  const importCachePath = path.join(ledgerDir, '.agy-import-cache.json');
+  const convA = '11111111-aaaa-1111-1111-111111111111';
+  const oldStaleId = '22222222-bbbb-2222-2222-222222222222';
+  fs.writeFileSync(sessionsPath, 'null', 'utf8');
+  fs.writeFileSync(importCachePath, JSON.stringify({ version: 1, entries: [] }), 'utf8');
+  handleHookPayload(
+    { hookEventName: 'SessionStart', conversationId: convA, workspacePaths: [repoDir], customLabel: 'Recovered' },
+    { ledgerDir, ponytailDir, allowTempWorkspaces: true },
+  );
+  assert.equal(JSON.parse(fs.readFileSync(sessionsPath, 'utf8'))[convA]?.customLabel, 'Recovered');
+
+  fs.writeFileSync(sessionsPath, '[]', 'utf8');
+  handleHookPayload(
+    { hookEventName: 'SessionStart', conversationId: convA, workspacePaths: [repoDir], customLabel: 'ArrayRecovered' },
+    { ledgerDir, ponytailDir, allowTempWorkspaces: true },
+  );
+  const afterArr = JSON.parse(fs.readFileSync(sessionsPath, 'utf8'));
+  assert.equal(Array.isArray(afterArr), false);
+  assert.equal(afterArr[convA]?.customLabel, 'ArrayRecovered');
+
+  // 2. Explicit empty brainDirs: [] must not prune expired .agy-sessions.json or foreign cache entries.
+  afterArr[oldStaleId] = { cwd: repoDir, updatedAt: Date.now() - 120_000 };
+  fs.writeFileSync(sessionsPath, JSON.stringify(afterArr), 'utf8');
+  const emptyRes = importAllBrains({
+    brainDirs: [],
+    ledgerDir,
+    ponytailDir,
+    allowTempWorkspaces: true,
+    sessionMetaTtlMs: 1000,
+    force: true,
+  });
+  assert.equal(emptyRes.sessionsFound, 0);
+  assert.ok(JSON.parse(fs.readFileSync(sessionsPath, 'utf8'))[oldStaleId], 'brainDirs: [] must not prune .agy-sessions.json');
+  const repairedCache = JSON.parse(fs.readFileSync(importCachePath, 'utf8'));
+  assert.equal(Array.isArray(repairedCache.entries), false, 'non-object import cache entries must be repaired to {}');
+
+  // Corrupt non-object .agy-sessions.json alone on unfiltered import is also repaired safely without crashing.
+  const corruptOnlyLedger = path.join(tmp, 'band-corrupt');
+  fs.mkdirSync(corruptOnlyLedger, { recursive: true });
+  fs.writeFileSync(path.join(corruptOnlyLedger, '.agy-sessions.json'), 'null', 'utf8');
+  fs.writeFileSync(path.join(corruptOnlyLedger, '.agy-import-cache.json'), JSON.stringify({ version: 1, entries: [] }), 'utf8');
+  process.env.PONYTAIL_AGY_ALLOW_TEMP = '1';
+  assert.doesNotThrow(() =>
+    importAllBrains({ ledgerDir: corruptOnlyLedger, ponytailDir, brainDirs: [], allowTempWorkspaces: true }),
+  );
+
+  // 3. Stale standalone child CSV row written by child Stop is removed when parent rolls child up via importAllBrains.
+  const parentId = 'aaaa1111-1111-1111-1111-111111111111';
+  const childId = 'bbbb2222-2222-2222-2222-222222222222';
+  const parentPath = path.join(brainDir, parentId, '.system_generated', 'logs', 'transcript.jsonl');
+  const childPath = path.join(brainDir, childId, '.system_generated', 'logs', 'transcript.jsonl');
+  writeJsonl(parentPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: 'Parent task' },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:00:05Z',
+      input_tokens: 100,
+      cache_read_tokens: 0,
+      output_tokens: 10,
+      tool_calls: [{ name: 'invoke_subagent', args: {} }, { name: 'read_file', args: { Path: JSON.stringify(path.join(repoDir, 'index.js')) } }],
+    },
+    { step_index: 2, source: 'MODEL', type: 'GENERIC', created_at: '2026-11-15T10:00:06Z', content: `Spawned subagent conversationId="${childId}"` },
+  ]);
+  writeJsonl(childPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:07Z', content: 'Child task' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:08Z', input_tokens: 50, cache_read_tokens: 0, output_tokens: 5, tool_calls: [] },
+  ]);
+
+  handleHookPayload(
+    { hookEventName: 'Stop', conversationId: childId, transcriptPath: childPath },
+    { ledgerDir, ponytailDir, allowTempWorkspaces: true },
+  );
+  assert.ok(fs.existsSync(path.join(ledgerDir, 'antigravity.csv')), 'child Stop initially writes standalone row');
+
+  const rollupRes = importAllBrains({ brainDirs: [brainDir], ledgerDir, ponytailDir, allowTempWorkspaces: true });
+  assert.equal(rollupRes.sessionsFound, 1);
+  assert.equal(rollupRes.totalBoardTasks, 1, 'rolled-up child CSV row must not double-count alongside parent');
+  assert.equal(fs.existsSync(path.join(ledgerDir, 'antigravity.csv')), false, 'empty standalone fallback CSV should be removed');
+  const projCsv = fs.readFileSync(path.join(ledgerDir, 'dedup-proj.csv'), 'utf8');
+  assert.equal(projCsv.includes('bbbb2222-'), false);
+
+  // 4. withLedgerLock releases on throw, preserves replaced .agy-band.lock token, and ignores invalid PONYTAIL_LOCK_TIMEOUT_MS.
+  const lockLedger = path.join(tmp, 'lock-band');
+  fs.mkdirSync(lockLedger, { recursive: true });
+  const lockPath = path.join(lockLedger, '.agy-band.lock');
+  assert.throws(
+    () =>
+      withLedgerLock(lockLedger, () => {
+        throw new Error('boom');
+      }),
+    /boom/,
+  );
+  assert.equal(fs.existsSync(lockPath), false, '.agy-band.lock must be released when callback throws');
+
+  withLedgerLock(lockLedger, () => {
+    fs.writeFileSync(lockPath, 'other-holder:999999:1\n', 'utf8');
+  });
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), 'other-holder:999999:1\n', 'holder must not delete a replaced lock token');
+  fs.rmSync(lockPath, { force: true });
+
+  for (const invalidTimeout of ['0', '-5', 'abc']) {
+    process.env.PONYTAIL_LOCK_TIMEOUT_MS = invalidTimeout;
+    fs.writeFileSync(lockPath, 'temp-blocker\n', 'utf8');
+    const releaser = spawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => require("fs").rmSync(process.argv[1], { force: true }), 120)', lockPath],
+      { stdio: 'ignore' },
+    );
+    try {
+      const ok = withLedgerLock(lockLedger, () => true);
+      assert.equal(ok, true, `invalid PONYTAIL_LOCK_TIMEOUT_MS=${invalidTimeout} must fall back to 5000ms default`);
+    } finally {
+      if (releaser.exitCode === null) releaser.kill();
+    }
+  }
+
+  // 5. CLI --status rejects --force/--project with exit 2 and prints human boardCompileError without --json.
+  for (const args of [['--status', '--force'], ['--status', '--project', 'demo']]) {
+    const res = spawnSync(process.execPath, ['--no-warnings', SYNC_SCRIPT, ...args], {
+      encoding: 'utf8',
+      timeout: 15000,
+    });
+    assert.equal(res.status, 2, `expected exit 2 for ${JSON.stringify(args)}, got ${res.status}`);
+    assert.ok(res.stderr.includes('--help'));
+  }
+
+  const brokenPt = path.join(tmp, 'broken-pt');
+  fs.mkdirSync(path.join(brokenPt, 'hooks', 'band'), { recursive: true });
+  fs.writeFileSync(path.join(brokenPt, 'hooks', 'band', 'logo.ts'), 'export const LOGO = "ok";\n', 'utf8');
+  fs.writeFileSync(path.join(brokenPt, 'hooks', 'band', 'board.ts'), 'export function broken( {\n', 'utf8');
+  const humanStatus = spawnSync(
+    process.execPath,
+    ['--no-warnings', SYNC_SCRIPT, '--status', '--ledger-dir', path.join(tmp, 'no-such-band'), '--ponytail-dir', brokenPt],
+    { encoding: 'utf8', timeout: 15000 },
+  );
+  assert.equal(humanStatus.status, 0, humanStatus.stderr);
+  assert.ok(humanStatus.stdout.includes('boardCompileError:'));
+});
