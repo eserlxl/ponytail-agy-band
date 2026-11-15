@@ -1539,3 +1539,56 @@ test('importAllBrains caches unchanged transcripts across runs, invalidates on c
   assert.equal(parsedForce.sessionsFound, 1);
   assert.equal(parsedForce.cachedSessions, 0);
 });
+
+test('CLI rejects invalid flags, missing values, --*=*, orphan modifiers, and conflicting modes with exit 2', () => {
+  const invalidCases = [
+    ['--unknown'],
+    ['-x'],
+    ['positional-arg'],
+    ['--brain-dir'],
+    ['--project'],
+    ['--ledger-dir'],
+    ['--ponytail-dir'],
+    ['--brain-dir', ''],
+    ['--project', ''],
+    ['--brain-dir', '--json'],
+    ['--brain-dir', '--help'],
+    ['--brain-dir=foo'],
+    ['--import=true'],
+    ['--force'],
+    ['--json'],
+    ['--project', 'foo'],
+    ['--brain-dir', 'foo'],
+    ['--ledger-dir', 'foo'],
+    ['--ponytail-dir', 'foo'],
+    ['--import', '--status'],
+    ['--unknown', '--help'],
+    ['--help', '--unknown'],
+    ['--import=false', '-h'],
+  ];
+
+  for (const args of invalidCases) {
+    const t0 = Date.now();
+    const res = spawnSync(process.execPath, ['--no-warnings', SYNC_SCRIPT, ...args], {
+      encoding: 'utf8',
+      timeout: 3500,
+    });
+    const elapsedMs = Date.now() - t0;
+    assert.equal(res.error, undefined, `unexpected error for ${JSON.stringify(args)}: ${res.error}`);
+    assert.equal(res.status, 2, `expected exit 2 for ${JSON.stringify(args)}, got ${res.status} stderr=${res.stderr}`);
+    assert.equal(res.stdout, '', `expected empty stdout for ${JSON.stringify(args)}`);
+    assert.ok(res.stderr.includes('--help'), `expected --help hint on stderr for ${JSON.stringify(args)}`);
+    assert.ok(elapsedMs < 3500, `expected fast exit before STDIN_TIMEOUT_MS for ${JSON.stringify(args)}, took ${elapsedMs}ms`);
+  }
+
+  for (const helpArgs of [['--import', '--help'], ['--import', '--status', '-h']]) {
+    const res = spawnSync(process.execPath, ['--no-warnings', SYNC_SCRIPT, ...helpArgs], {
+      encoding: 'utf8',
+      timeout: 3500,
+    });
+    assert.equal(res.error, undefined);
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(res.stdout.includes('Usage:'));
+    assert.equal(res.stderr, '');
+  }
+});
