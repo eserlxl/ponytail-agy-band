@@ -106,11 +106,67 @@ function defaultPonytailLevel() {
   return 'full';
 }
 
+let atomicSeq = 0;
+const SLEEP_VIEW = new Int32Array(new SharedArrayBuffer(4));
+const activeLedgerLocks = new Map();
+
 function writeAtomic(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${++atomicSeq}`;
   fs.writeFileSync(tmp, content, 'utf8');
   fs.renameSync(tmp, filePath);
+}
+
+/** Serialize read-modify-write ledger mutations across concurrent hook/import processes. */
+function withLedgerLock(ledgerDir, fn, timeoutMs = 5000, staleMs = 15000) {
+  const key = path.resolve(ledgerDir);
+  const depth = activeLedgerLocks.get(key) || 0;
+  if (depth > 0) {
+    activeLedgerLocks.set(key, depth + 1);
+    try {
+      return fn();
+    } finally {
+      activeLedgerLocks.set(key, depth);
+    }
+  }
+
+  fs.mkdirSync(ledgerDir, { recursive: true });
+  const lockPath = path.join(ledgerDir, '.agy-band.lock');
+  const deadline = Date.now() + timeoutMs;
+  let acquired = false;
+  while (true) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx');
+      try {
+        fs.writeSync(fd, `${process.pid}\n`);
+      } finally {
+        fs.closeSync(fd);
+      }
+      acquired = true;
+      break;
+    } catch (err) {
+      if (err && err.code !== 'EEXIST') throw err;
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > staleMs) {
+          fs.rmSync(lockPath, { force: true });
+          continue;
+        }
+      } catch {}
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for ledger lock: ${lockPath}`);
+      }
+      Atomics.wait(SLEEP_VIEW, 0, 0, 15);
+    }
+  }
+
+  activeLedgerLocks.set(key, 1);
+  try {
+    return fn();
+  } finally {
+    activeLedgerLocks.delete(key);
+    if (acquired) fs.rmSync(lockPath, { force: true });
+  }
 }
 
 function readJsonSafe(filePath, fallback) {
@@ -814,61 +870,62 @@ function tasksFromLocal(text) {
 }
 
 function upsertCsvRows(ledgerDir, entries) {
-  fs.mkdirSync(ledgerDir, { recursive: true });
-  const byFile = new Map();
-  const prefixesToDropFromFallback = new Set();
+  return withLedgerLock(ledgerDir, () => {
+    const byFile = new Map();
+    const prefixesToDropFromFallback = new Set();
 
-  for (const entry of entries) {
-    const file = path.join(ledgerDir, `${entry.project.replace(/[^\w.-]/g, '_')}.csv`);
-    if (!byFile.has(file)) byFile.set(file, []);
-    byFile.get(file).push(entry);
-    if (entry.project !== 'antigravity') {
-      prefixesToDropFromFallback.add(`${entry.conversationId.slice(0, 8)}-`);
-    }
-  }
-
-  let updated = 0;
-  for (const [file, items] of byFile) {
-    let existing = '';
-    try {
-      existing = fs.readFileSync(file, 'utf8');
-    } catch {}
-    const existingRows = parseCsvLocal(existing).filter((cols, idx) => !(idx === 0 && cols[0] === 'key'));
-    const prefixes = new Set(items.map(it => `${it.conversationId.slice(0, 8)}-`));
-    const keptLines = [];
-    for (const cols of existingRows) {
-      const k = cols[0] || '';
-      if (!prefixes.has(k.slice(0, 9))) {
-        keptLines.push(cols.map(csvField).join(','));
+    for (const entry of entries) {
+      const file = path.join(ledgerDir, `${entry.project.replace(/[^\w.-]/g, '_')}.csv`);
+      if (!byFile.has(file)) byFile.set(file, []);
+      byFile.get(file).push(entry);
+      if (entry.project !== 'antigravity') {
+        prefixesToDropFromFallback.add(`${entry.conversationId.slice(0, 8)}-`);
       }
     }
-    const newLines = items.map(it => formatCsvRow(it.conversationId, it.stats));
-    const nextText = [CSV_HEADER, ...keptLines, ...newLines].join('\n') + '\n';
-    if (nextText !== existing) {
-      writeAtomic(file, nextText);
-      updated += items.length;
-    }
-  }
 
-  // Clean up any stale fallback rows in antigravity.csv whose project is now known.
-  if (prefixesToDropFromFallback.size > 0) {
-    const fallbackFile = path.join(ledgerDir, 'antigravity.csv');
-    if (fs.existsSync(fallbackFile)) {
-      const existing = fs.readFileSync(fallbackFile, 'utf8');
-      const rows = parseCsvLocal(existing).filter((cols, idx) => !(idx === 0 && cols[0] === 'key'));
-      const kept = rows.filter(cols => !prefixesToDropFromFallback.has((cols[0] || '').slice(0, 9)));
-      if (kept.length !== rows.length) {
-        if (kept.length === 0) {
-          fs.unlinkSync(fallbackFile);
-        } else {
-          const text = [CSV_HEADER, ...kept.map(c => c.map(csvField).join(','))].join('\n') + '\n';
-          writeAtomic(fallbackFile, text);
+    let updated = 0;
+    for (const [file, items] of byFile) {
+      let existing = '';
+      try {
+        existing = fs.readFileSync(file, 'utf8');
+      } catch {}
+      const existingRows = parseCsvLocal(existing).filter((cols, idx) => !(idx === 0 && cols[0] === 'key'));
+      const prefixes = new Set(items.map(it => `${it.conversationId.slice(0, 8)}-`));
+      const keptLines = [];
+      for (const cols of existingRows) {
+        const k = cols[0] || '';
+        if (!prefixes.has(k.slice(0, 9))) {
+          keptLines.push(cols.map(csvField).join(','));
+        }
+      }
+      const newLines = items.map(it => formatCsvRow(it.conversationId, it.stats));
+      const nextText = [CSV_HEADER, ...keptLines, ...newLines].join('\n') + '\n';
+      if (nextText !== existing) {
+        writeAtomic(file, nextText);
+        updated += items.length;
+      }
+    }
+
+    // Clean up any stale fallback rows in antigravity.csv whose project is now known.
+    if (prefixesToDropFromFallback.size > 0) {
+      const fallbackFile = path.join(ledgerDir, 'antigravity.csv');
+      if (fs.existsSync(fallbackFile)) {
+        const existing = fs.readFileSync(fallbackFile, 'utf8');
+        const rows = parseCsvLocal(existing).filter((cols, idx) => !(idx === 0 && cols[0] === 'key'));
+        const kept = rows.filter(cols => !prefixesToDropFromFallback.has((cols[0] || '').slice(0, 9)));
+        if (kept.length !== rows.length) {
+          if (kept.length === 0) {
+            fs.rmSync(fallbackFile, { force: true });
+          } else {
+            const text = [CSV_HEADER, ...kept.map(c => c.map(csvField).join(','))].join('\n') + '\n';
+            writeAtomic(fallbackFile, text);
+          }
         }
       }
     }
-  }
 
-  return updated;
+    return updated;
+  });
 }
 
 function loadPonytailBoardModule(ponytailDir) {
@@ -1007,30 +1064,31 @@ function renderStandaloneBoardHtml(payload) {
 }
 
 function rebuildBoardHtml(ledgerDir, ponytailDir = defaultPonytailDir()) {
-  fs.mkdirSync(ledgerDir, { recursive: true });
-  const csvFiles = fs.readdirSync(ledgerDir).filter(f => f.endsWith('.csv')).sort();
-  const boardFile = path.join(ledgerDir, 'board.html');
+  return withLedgerLock(ledgerDir, () => {
+    const csvFiles = fs.readdirSync(ledgerDir).filter(f => f.endsWith('.csv')).sort();
+    const boardFile = path.join(ledgerDir, 'board.html');
 
-  try {
-    const board = loadPonytailBoardModule(ponytailDir);
-    const tasks = csvFiles.flatMap(f => board.tasksFrom(fs.readFileSync(path.join(ledgerDir, f), 'utf8')));
-    const html = board.boardHtml(tasks, Date.now());
-    writeAtomic(boardFile, html);
-    return { boardFile, totalTasks: tasks.length, renderer: 'ponytail' };
-  } catch {
-    const tasks = csvFiles.flatMap(f => tasksFromLocal(fs.readFileSync(path.join(ledgerDir, f), 'utf8')));
-    const payload = serializeBoardPayload(tasks, Date.now());
-    if (fs.existsSync(boardFile)) {
-      const current = fs.readFileSync(boardFile, 'utf8');
-      if (BOARD_DATA_RE.test(current)) {
-        const updated = current.replace(BOARD_DATA_RE, (_, open, close) => `${open}${payload}${close}`);
-        writeAtomic(boardFile, updated);
-        return { boardFile, totalTasks: tasks.length, renderer: 'fallback' };
+    try {
+      const board = loadPonytailBoardModule(ponytailDir);
+      const tasks = csvFiles.flatMap(f => board.tasksFrom(fs.readFileSync(path.join(ledgerDir, f), 'utf8')));
+      const html = board.boardHtml(tasks, Date.now());
+      writeAtomic(boardFile, html);
+      return { boardFile, totalTasks: tasks.length, renderer: 'ponytail' };
+    } catch {
+      const tasks = csvFiles.flatMap(f => tasksFromLocal(fs.readFileSync(path.join(ledgerDir, f), 'utf8')));
+      const payload = serializeBoardPayload(tasks, Date.now());
+      if (fs.existsSync(boardFile)) {
+        const current = fs.readFileSync(boardFile, 'utf8');
+        if (BOARD_DATA_RE.test(current)) {
+          const updated = current.replace(BOARD_DATA_RE, (_, open, close) => `${open}${payload}${close}`);
+          writeAtomic(boardFile, updated);
+          return { boardFile, totalTasks: tasks.length, renderer: 'fallback' };
+        }
       }
+      writeAtomic(boardFile, renderStandaloneBoardHtml(payload));
+      return { boardFile, totalTasks: tasks.length, renderer: 'standalone' };
     }
-    writeAtomic(boardFile, renderStandaloneBoardHtml(payload));
-    return { boardFile, totalTasks: tasks.length, renderer: 'standalone' };
-  }
+  });
 }
 
 function resolveBestTranscriptPath(candidatePath) {
@@ -1149,8 +1207,11 @@ function importAllBrains(options = {}) {
     entries.push({ conversationId: id, project: stats.project, stats });
   }
 
-  const updated = entries.length > 0 ? upsertCsvRows(ledgerDir, entries) : 0;
-  const boardResult = rebuildBoardHtml(ledgerDir, ponytailDir);
+  const { updated, boardResult } = withLedgerLock(ledgerDir, () => {
+    const rowsUpdated = entries.length > 0 ? upsertCsvRows(ledgerDir, entries) : 0;
+    const htmlRes = rebuildBoardHtml(ledgerDir, ponytailDir);
+    return { updated: rowsUpdated, boardResult: htmlRes };
+  });
   return {
     sessionsFound: found,
     rowsUpdated: updated,
@@ -1168,18 +1229,20 @@ function handleHookPayload(payload, options = {}) {
   const modelName = String(payload?.modelName || '').trim();
 
   const metaCachePath = path.join(ledgerDir, '.agy-sessions.json');
-  const cache = readJsonSafe(metaCachePath, {});
-  if (id) {
-    const prev = cache[id] || {};
-    const nextMeta = {
-      cwd: cwd || prev.cwd || '',
-      modelName: modelName && !['auto', 'none'].includes(modelName.toLowerCase()) ? modelName : prev.modelName || '',
-      updatedAt: Date.now(),
-    };
-    cache[id] = nextMeta;
-    fs.mkdirSync(ledgerDir, { recursive: true });
-    writeAtomic(metaCachePath, JSON.stringify(cache, null, 2));
-  }
+  const sessionMetaForStop = id
+    ? withLedgerLock(ledgerDir, () => {
+        const cache = readJsonSafe(metaCachePath, {});
+        const prev = cache[id] || {};
+        const nextMeta = {
+          cwd: cwd || prev.cwd || '',
+          modelName: modelName && !['auto', 'none'].includes(modelName.toLowerCase()) ? modelName : prev.modelName || '',
+          updatedAt: Date.now(),
+        };
+        cache[id] = nextMeta;
+        writeAtomic(metaCachePath, JSON.stringify(cache, null, 2));
+        return nextMeta;
+      })
+    : {};
 
   if (event === 'Stop' && id && payload?.transcriptPath) {
     const tPath = resolveBestTranscriptPath(String(payload.transcriptPath));
@@ -1193,13 +1256,15 @@ function handleHookPayload(payload, options = {}) {
       })
         .map(cid => resolveBestTranscriptPath(path.join(brainDir, cid, '.system_generated', 'logs', 'transcript.jsonl')))
         .filter(Boolean);
-      const stats = parseAgyTranscript(tPath, cache[id] || {}, childPaths, {
+      const stats = parseAgyTranscript(tPath, sessionMetaForStop, childPaths, {
         ponytailDir,
         allowTempWorkspaces: options.allowTempWorkspaces,
       });
       if (stats) {
-        upsertCsvRows(ledgerDir, [{ conversationId: id, project: stats.project, stats }]);
-        rebuildBoardHtml(ledgerDir, ponytailDir);
+        withLedgerLock(ledgerDir, () => {
+          upsertCsvRows(ledgerDir, [{ conversationId: id, project: stats.project, stats }]);
+          rebuildBoardHtml(ledgerDir, ponytailDir);
+        });
       }
     }
   }

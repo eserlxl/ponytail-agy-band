@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
@@ -707,4 +707,61 @@ test('rebuildBoardHtml falls back cleanly when Ponytail is not installed (standa
     updatedPayload.tasks.map(task => task.name).sort(),
     ['Fix $& $$ and $1 fallback task', 'Initial standalone task'],
   );
+});
+
+test('withLedgerLock serializes parallel writers and cleans stale lockfiles', async t => {
+  const tmp = makeTmpDir('pw-agy-lock-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ledgerDir = path.join(tmp, 'band');
+  fs.mkdirSync(ledgerDir, { recursive: true });
+
+  // Stale lockfile from a crashed process should be reclaimed without error.
+  const staleLock = path.join(ledgerDir, '.agy-band.lock');
+  fs.writeFileSync(staleLock, '999999\n', 'utf8');
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(staleLock, past, past);
+
+  upsertCsvRows(ledgerDir, [
+    {
+      conversationId: 'aaaaaaaa-0000-0000-0000-000000000001',
+      project: 'concurrent',
+      stats: {
+        startedMs: Date.parse('2026-11-15T08:00:00Z'),
+        project: 'concurrent',
+        name: 'Initial row',
+        costUsd: null,
+        turns: 1,
+        agentMs: 1000,
+        tokensTotal: 10,
+        tokensOutput: 1,
+        tests: 'not run',
+        level: 'full',
+        model: 'Agy',
+      },
+    },
+  ]);
+  assert.equal(fs.existsSync(staleLock), false);
+
+  const runWorker = (id, name) =>
+    new Promise((resolve, reject) => {
+      const script = `const { handleHookPayload, upsertCsvRows } = require(${JSON.stringify(SYNC_SCRIPT)});
+handleHookPayload({ hookEventName: 'SessionStart', conversationId: ${JSON.stringify(id)}, workspacePaths: ['/opt/lxl/concurrent'], modelName: 'auto' }, { ledgerDir: ${JSON.stringify(ledgerDir)}, allowTempWorkspaces: true });
+upsertCsvRows(${JSON.stringify(ledgerDir)}, [{ conversationId: ${JSON.stringify(id)}, project: 'concurrent', stats: { startedMs: 1763200000000, project: 'concurrent', name: ${JSON.stringify(name)}, costUsd: null, turns: 1, agentMs: 1000, tokensTotal: 20, tokensOutput: 2, tests: 'not run', level: 'full', model: 'Agy' } }]);`;
+      const child = spawn(process.execPath, ['-e', script], { stdio: 'ignore' });
+      child.on('error', reject);
+      child.on('exit', code => (code === 0 ? resolve() : reject(new Error(`worker exited ${code}`))));
+    });
+
+  await Promise.all([
+    runWorker('bbbbbbbb-0000-0000-0000-000000000002', 'Worker B'),
+    runWorker('cccccccc-0000-0000-0000-000000000003', 'Worker C'),
+  ]);
+
+  const cache = JSON.parse(fs.readFileSync(path.join(ledgerDir, '.agy-sessions.json'), 'utf8'));
+  assert.ok(cache['bbbbbbbb-0000-0000-0000-000000000002']);
+  assert.ok(cache['cccccccc-0000-0000-0000-000000000003']);
+  const csv = fs.readFileSync(path.join(ledgerDir, 'concurrent.csv'), 'utf8');
+  assert.ok(csv.includes('Worker B'));
+  assert.ok(csv.includes('Worker C'));
+  assert.equal(fs.existsSync(staleLock), false);
 });
