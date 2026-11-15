@@ -260,7 +260,7 @@ function extractRawPromptText(content) {
 
 function detectModelChange(content) {
   if (typeof content !== 'string') return null;
-  const m = /changed setting `Model Selection` from [^\n]+? to ([^\n.]+)/.exec(content);
+  const m = /changed setting `Model Selection` from [^\n]+? to ([^\n<]+?)(?=\.(?:\s|$|<)|$|\n|<)/.exec(content);
   return m ? m[1].trim() : null;
 }
 

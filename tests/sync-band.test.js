@@ -313,6 +313,31 @@ test('unknown or auto model leaves costUsd null (empty cost_usd) and formats mod
   assert.equal(estimateStepCost('auto', false, 1000, 0, 100, ponytailDir), null);
   assert.equal(formatBoardModel('gemini-3.8-flash-high'), 'Agy · Gemini 3.8 Flash');
   assert.equal(formatBoardModel('claude-opus-5-5-medium'), 'Agy · Opus 5.5');
+
+  const dottedTranscript = path.join(tmp, 'dotted-model.jsonl');
+  writeJsonl(dottedTranscript, [
+    {
+      step_index: 0,
+      source: 'USER_EXPLICIT',
+      type: 'USER_INPUT',
+      created_at: '2026-11-15T11:30:00Z',
+      content:
+        '<USER_REQUEST>\nTest dotted model name\n</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.8 Flash (High). Do not mention this.\n</USER_SETTINGS_CHANGE>',
+    },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T11:30:10Z',
+      input_tokens: 1_000_000,
+      cache_read_tokens: 0,
+      output_tokens: 100_000,
+      tool_calls: [],
+    },
+  ]);
+  const dottedStats = parseAgyTranscript(dottedTranscript, {}, [], { ponytailDir });
+  assert.equal(dottedStats.model, 'Agy · Gemini 3.8 Flash');
+  assert.ok(Math.abs(dottedStats.costUsd - 1.125) < 1e-6);
 });
 
 test('upsertCsvRows preserves Claude Code rows, deduplicates agy rows, cleans antigravity fallback, and rebuildBoardHtml includes both', t => {
