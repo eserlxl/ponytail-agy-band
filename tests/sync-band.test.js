@@ -1135,3 +1135,20 @@ test('streamJsonl skips malformed JSON lines while letting onRecord exceptions p
     /callback boom/,
   );
 });
+
+test('getClaudePrices caches custom tariffs per resolved ponytailDir', t => {
+  const tmp = makeTmpDir('pw-agy-prices-dir-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const d1 = path.join(tmp, 'p1');
+  const d2 = path.join(tmp, 'p2');
+  for (const [dir, rate] of [
+    [d1, 10],
+    [d2, 20],
+  ]) {
+    fs.mkdirSync(path.join(dir, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'hooks', 'ponytail-band-import.js'), `exports.PRICES = { 'claude-custom-x': [${rate}, 0, 0, 0, 0] };`);
+  }
+  assert.equal(estimateStepCost('claude-custom-x', false, 1_000_000, 0, 0, d1), 10);
+  assert.equal(estimateStepCost('claude-custom-x', false, 1_000_000, 0, 0, d2), 20);
+  assert.equal(estimateStepCost('claude-custom-x', false, 1_000_000, 0, 0, path.join(tmp, 'p1', '.')), 10);
+});

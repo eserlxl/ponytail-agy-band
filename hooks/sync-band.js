@@ -177,22 +177,23 @@ function readJsonSafe(filePath, fallback) {
   }
 }
 
-let cachedClaudePrices = null;
+const cachedClaudePrices = new Map();
 function getClaudePrices(ponytailDir) {
-  if (cachedClaudePrices) return cachedClaudePrices;
   const dir = ponytailDir || defaultPonytailDir();
+  const key = path.resolve(dir);
+  if (cachedClaudePrices.has(key)) return cachedClaudePrices.get(key);
   const importer = path.join(dir, 'hooks', 'ponytail-band-import.js');
+  let prices = BUILTIN_CLAUDE_PRICES;
   try {
     if (fs.existsSync(importer)) {
       const mod = require(importer);
       if (mod && mod.PRICES && typeof mod.PRICES === 'object') {
-        cachedClaudePrices = { ...BUILTIN_CLAUDE_PRICES, ...mod.PRICES };
-        return cachedClaudePrices;
+        prices = { ...BUILTIN_CLAUDE_PRICES, ...mod.PRICES };
       }
     }
   } catch {}
-  cachedClaudePrices = BUILTIN_CLAUDE_PRICES;
-  return cachedClaudePrices;
+  cachedClaudePrices.set(key, prices);
+  return prices;
 }
 
 function unwrapArg(val) {
