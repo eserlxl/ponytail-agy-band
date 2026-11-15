@@ -16,7 +16,7 @@ All notable changes to `ponytail-agy-band` are documented in this file.
 - `inspectBandStatus` and `importAllBrains` honor explicit empty `brainDirs: []` arrays instead of falling back to default brain directories or treating empty scans as global pruning sweeps.
 - Corrupt non-object JSON (`null`, `[]`, primitives) in `.agy-sessions.json` and `.agy-import-cache.json` is safely normalized and repaired instead of throwing or dropping hook metadata.
 - `withLedgerLock` uses per-holder ownership tokens and serialized stale-lock reaping to prevent active-lock reclamation races, and `writeAtomic` unlinks temporary files immediately on write/rename failure.
-- `importAllBrains` removes stale standalone child subagent CSV rows when rolling descendants into their parent conversation so child usage is never double-counted.
+- `importAllBrains` and `Stop` hooks remove stale standalone child subagent CSV rows when rolling descendants into their parent conversation so child usage is never double-counted.
 - Malformed hook stdin payloads (including UTF-8 BOM-prefixed `Stop` events) preserve `{ decision: 'allow' }` fail-open output on `Stop` turns without aborting hooks.
 - Unfiltered `importAllBrains` / `--import` scans prune vanished session entries from `.agy-import-cache.json` strictly scoped to the scanned `brainDirs` (and compact 0-session entries) while preserving `--project` and sibling-directory entries.
 - Unfiltered `importAllBrains` / `--import` scans prune expired or corrupt absent-transcript entries from `.agy-sessions.json` under `withLedgerLock` (TTL-gated) while retaining active sessions and fresh `SessionStart` metadata.
