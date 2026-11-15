@@ -23,6 +23,7 @@ const {
   rebuildBoardHtml,
   streamJsonl,
   sweepStaleTempFiles,
+  testsLabelFromState,
   upsertCsvRows,
   withLedgerLock,
 } = require(SYNC_SCRIPT);
@@ -1815,4 +1816,120 @@ test('importAllBrains prunes expired absent-transcript .agy-sessions.json entrie
   assert.equal(Boolean(after[corruptId]), false, 'entry without valid updatedAt should be pruned');
   assert.ok(after[activeId], 'old entry whose transcript exists must be retained');
   assert.equal(after[freshHookId]?.customLabel, 'Fresh Start', 'fresh SessionStart entry within TTL must be retained');
+});
+
+test('inspectBandStatus, rebuildBoardHtml, and secondary parser/env branches handle broken boards and defaults', t => {
+  const dir = makeTmpDir('agy-secondary-');
+  const prevDefaultMode = process.env.PONYTAIL_DEFAULT_MODE;
+  const prevXdgConfig = process.env.XDG_CONFIG_HOME;
+  t.after(() => {
+    if (prevDefaultMode === undefined) delete process.env.PONYTAIL_DEFAULT_MODE;
+    else process.env.PONYTAIL_DEFAULT_MODE = prevDefaultMode;
+    if (prevXdgConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdgConfig;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // 1. Broken Ponytail TypeScript board triggers fallback rendering and read-only diagnostics.
+  const brokenPonytailDir = path.join(dir, 'broken-ponytail');
+  const bandDir = path.join(brokenPonytailDir, 'hooks', 'band');
+  fs.mkdirSync(bandDir, { recursive: true });
+  fs.writeFileSync(path.join(bandDir, 'logo.ts'), 'export const LOGO = "x";\n', 'utf8');
+  fs.writeFileSync(path.join(bandDir, 'board.ts'), 'export function broken( {\n', 'utf8');
+
+  const missingLedgerDir = path.join(dir, 'nonexistent-ledger');
+  const status = inspectBandStatus({ brainDirs: [], ledgerDir: missingLedgerDir, ponytailDir: brokenPonytailDir });
+  assert.equal(status.ponytailDir, brokenPonytailDir);
+  assert.equal(status.boardMode, 'standalone');
+  assert.equal(typeof status.boardCompileError, 'string');
+  assert.ok(status.boardCompileError.length > 0);
+  assert.equal(fs.existsSync(missingLedgerDir), false, 'inspectBandStatus must not create missing ledgerDir');
+
+  const cliStatus = spawnSync(
+    process.execPath,
+    ['--no-warnings', SYNC_SCRIPT, '--status', '--ledger-dir', missingLedgerDir, '--ponytail-dir', brokenPonytailDir, '--json'],
+    { encoding: 'utf8', timeout: 15000 },
+  );
+  assert.equal(cliStatus.status, 0, cliStatus.stderr);
+  const parsedStatus = JSON.parse(cliStatus.stdout);
+  assert.equal(parsedStatus.boardMode, 'standalone');
+  assert.equal(typeof parsedStatus.boardCompileError, 'string');
+  assert.ok(parsedStatus.boardCompileError.length > 0);
+  assert.equal(fs.existsSync(missingLedgerDir), false, 'CLI --status must not mutate disk on broken board');
+
+  const rebuildLedgerDir = path.join(dir, 'rebuild-ledger');
+  fs.mkdirSync(rebuildLedgerDir, { recursive: true });
+  fs.writeFileSync(path.join(rebuildLedgerDir, 'antigravity.csv'), `${CSV_HEADER}\n`, 'utf8');
+  const standaloneBuild = rebuildBoardHtml(rebuildLedgerDir, brokenPonytailDir);
+  assert.equal(standaloneBuild.renderer, 'standalone');
+  assert.ok(fs.existsSync(standaloneBuild.boardFile));
+  const fallbackBuild = rebuildBoardHtml(rebuildLedgerDir, brokenPonytailDir);
+  assert.equal(fallbackBuild.renderer, 'fallback');
+
+  // 2. Argon/carbon/hydrogen tariffs & board model formatting.
+  assert.equal(formatBoardModel('gemini-4-argon'), 'Agy · Gemini 4 Argon');
+  assert.equal(formatBoardModel('gemini-4-carbon'), 'Agy · Gemini 4 Carbon');
+  assert.equal(formatBoardModel('gemini-4-hydrogen'), 'Agy · Gemini 4 Hydrogen');
+  assert.ok(Math.abs(estimateStepCost('gemini-4-argon', false, 1e6, 1e6, 1e6) - 12.1) < 1e-9);
+  assert.ok(Math.abs(estimateStepCost('gemini-4-hydrogen', false, 1e6, 1e6, 1e6) - 9.075) < 1e-9);
+  assert.equal(testsLabelFromState({ state: 'fail', failed: 2 }), '2 failed');
+  assert.equal(testsLabelFromState({ state: 'fail' }), 'failed');
+
+  // 3. >30m idle gap without ask_question is excluded from agentMs, test failure renders "2 failed",
+  // and XDG_CONFIG_HOME/ponytail/config.json -> PONYTAIL_DEFAULT_MODE fallback order works.
+  const transcriptPath = path.join(dir, 'brain', 'sess-secondary', '.system_generated', 'logs', 'transcript.jsonl');
+  writeJsonl(transcriptPath, [
+    {
+      step_index: 0,
+      source: 'USER_EXPLICIT',
+      type: 'USER_INPUT',
+      created_at: '2026-11-15T10:00:00Z',
+      content:
+        '<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from Auto to gemini-4-argon.</USER_SETTINGS_CHANGE>\n<USER_REQUEST>run</USER_REQUEST>',
+    },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:00:10Z',
+      input_tokens: 1000,
+      cache_read_tokens: 0,
+      output_tokens: 200,
+      tool_calls: [],
+    },
+    {
+      step_index: 2,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:40:00Z',
+      input_tokens: 1000,
+      cache_read_tokens: 0,
+      output_tokens: 200,
+      tool_calls: [{ name: 'run_command', args: { CommandLine: 'npm test' } }],
+    },
+    {
+      step_index: 3,
+      source: 'SYSTEM',
+      type: 'GENERIC',
+      created_at: '2026-11-15T10:40:10Z',
+      content: 'Command exited with code 1\n2 failed, 1 passed',
+    },
+  ]);
+
+  const xdgDir = path.join(dir, 'xdg');
+  fs.mkdirSync(path.join(xdgDir, 'ponytail'), { recursive: true });
+  fs.writeFileSync(path.join(xdgDir, 'ponytail', 'config.json'), JSON.stringify({ defaultMode: 'lite' }), 'utf8');
+  delete process.env.PONYTAIL_DEFAULT_MODE;
+  process.env.XDG_CONFIG_HOME = xdgDir;
+
+  const noPonytail = path.join(dir, 'missing-ponytail');
+  const cfgParsed = parseAgyTranscript(transcriptPath, {}, [], { ponytailDir: noPonytail });
+  assert.equal(cfgParsed.level, 'lite');
+  assert.equal(cfgParsed.agentMs, 20_000, '>30m gap without ask_question must not inflate agentMs');
+  assert.equal(cfgParsed.tests, '2 failed');
+  assert.equal(cfgParsed.model, 'Agy · Gemini 4 Argon');
+
+  process.env.PONYTAIL_DEFAULT_MODE = 'ultra';
+  const envParsed = parseAgyTranscript(transcriptPath, {}, [], { ponytailDir: noPonytail });
+  assert.equal(envParsed.level, 'ultra');
 });
