@@ -1633,6 +1633,12 @@ function parseCliArgs(argv) {
     ledgerDir: undefined,
     ponytailDir: undefined,
   };
+  const finalize = error => {
+    if (opts.brainDirs.length === 0) delete opts.brainDirs;
+    if (opts.projects.length === 0) delete opts.projects;
+    if (error) opts.error = error;
+    return opts;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--import') opts.importMode = true;
@@ -1640,18 +1646,41 @@ function parseCliArgs(argv) {
     else if (a === '--status') opts.statusMode = true;
     else if (a === '--help' || a === '-h') opts.help = true;
     else if (a === '--json') opts.json = true;
-    else if (a === '--brain-dir' && argv[i + 1]) opts.brainDirs.push(argv[++i]);
-    else if (a === '--project' && argv[i + 1]) opts.projects.push(argv[++i]);
-    else if (a === '--ledger-dir' && argv[i + 1]) opts.ledgerDir = argv[++i];
-    else if (a === '--ponytail-dir' && argv[i + 1]) opts.ponytailDir = argv[++i];
+    else if (a === '--brain-dir' || a === '--project' || a === '--ledger-dir' || a === '--ponytail-dir') {
+      const val = argv[i + 1];
+      if (val === undefined || val === '' || !val.trim() || val.startsWith('-')) {
+        return finalize(`missing or invalid value for ${a}; use ${a} <value> (run --help for usage)`);
+      }
+      i++;
+      if (a === '--brain-dir') opts.brainDirs.push(val);
+      else if (a === '--project') opts.projects.push(val);
+      else if (a === '--ledger-dir') opts.ledgerDir = val;
+      else opts.ponytailDir = val;
+    } else if (a.startsWith('--') && a.includes('=')) {
+      return finalize(`unsupported "--option=value" form "${a}"; use space-separated --option <value> (run --help for usage)`);
+    } else if (a.startsWith('-')) {
+      return finalize(`unknown option "${a}" (run --help for usage)`);
+    } else {
+      return finalize(`unexpected argument "${a}" (run --help for usage)`);
+    }
   }
-  if (opts.brainDirs.length === 0) delete opts.brainDirs;
-  if (opts.projects.length === 0) delete opts.projects;
-  return opts;
+  if (!opts.help) {
+    if (opts.importMode && opts.statusMode) {
+      return finalize('cannot combine --import and --status (run --help for usage)');
+    }
+    if (argv.length > 0 && !opts.importMode && !opts.statusMode) {
+      return finalize('missing mode flag: specify --import or --status (run --help for usage)');
+    }
+  }
+  return finalize();
 }
 
 if (require.main === module) {
   const cli = parseCliArgs(process.argv.slice(2));
+  if (cli.error) {
+    process.stderr.write(`ponytail-agy-band: ${cli.error}\n`);
+    process.exit(2);
+  }
   if (cli.help) {
     process.stdout.write(`${CLI_HELP_TEXT}\n`);
     process.exit(0);
