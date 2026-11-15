@@ -65,6 +65,13 @@ node --no-warnings ~/.gemini/config/plugins/ponytail-agy-band/hooks/sync-band.js
 
 CLI exit codes: `0` on normal completion (`-h`/`--help`, `--import`, `--status`, or stdin hook mode with no arguments), or `2` on invalid/unknown flags, positional arguments, `--option=value` syntax (use space-separated `--option <value>`), missing values, or conflicting/incomplete mode combinations.
 
+## Troubleshooting
+
+- **Standalone board / `boardCompileError`**: Run `node --no-warnings ./hooks/sync-band.js --status` (or append `--json`). If Ponytail sources are absent or fail to compile, `boardMode` falls back to `standalone` and `boardCompileError` prints the failure details; update Ponytail or override `--ponytail-dir` / `PONYTAIL_PLUGIN_DIR`.
+- **Stale cache or missing sessions**: Pass `--import --force` to rebuild `.agy-import-cache.json` from transcripts on disk. Unfiltered default/`PONYTAIL_AGY_BRAIN_DIRS` `--import` scans automatically prune disappeared sessions from cache and expired absent entries from `.agy-sessions.json` (scoped `--project` and explicit `--brain-dir` runs leave shared metadata untouched).
+- **Lock contention & temp files**: Keep `PONYTAIL_LOCK_TIMEOUT_MS` under ~`7000` ms when hooks run under `hooks.json` (`10`s `SessionStart` / `15`s `Stop`), since `Stop` can lock twice for metadata and CSV writes; stale `.agy-band.lock` and `*.tmp.*` files under `$XDG_CONFIG_HOME/ponytail/band` (or `~/.config/ponytail/band`) older than 15s are cleaned automatically, and hook invocations fail open.
+- **CLI exit code `2` & `antigravity.csv` rows**: Exit code `2` flags bad options, `--option=value` syntax (use `--option <value>`), missing values, or mode conflicts — check `--help`. Early turns placed in `antigravity.csv` are automatically removed when a session resolves to `<project>.csv`.
+
 ## Development & Testing
 
 ```bash
