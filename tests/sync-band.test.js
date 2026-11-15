@@ -1677,3 +1677,78 @@ test('hook stdin handles BOM Stop payloads, malformed Stop JSON, non-Stop errors
   assert.deepEqual(JSON.parse(lockedStop.stdout.trim()), { decision: 'allow' });
   assert.ok(elapsedMs < 3500, `locked Stop should fail open quickly, took ${elapsedMs}ms`);
 });
+
+test('importAllBrains and CLI --import prune vanished cache entries per brain dir while preserving --project and sibling dirs', t => {
+  const tmp = makeTmpDir('pw-agy-cache-prune-');
+  const prevBrainEnv = process.env.PONYTAIL_AGY_BRAIN_DIRS;
+  t.after(() => {
+    if (prevBrainEnv === undefined) delete process.env.PONYTAIL_AGY_BRAIN_DIRS;
+    else process.env.PONYTAIL_AGY_BRAIN_DIRS = prevBrainEnv;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const ponytailDir = makePonytailFixture(tmp);
+  const ledgerDir = path.join(tmp, 'band');
+  const brainA = path.join(tmp, 'brain-a');
+  const brainASibling = path.join(tmp, 'brain-a2');
+  const repoAlpha = path.join(tmp, 'alpha');
+  const repoBeta = path.join(tmp, 'beta');
+  for (const r of [repoAlpha, repoBeta]) {
+    fs.mkdirSync(r, { recursive: true });
+    spawnSync('git', ['init', r], { stdio: 'ignore' });
+  }
+
+  const mkSession = (bDir, id, repo) => {
+    const tPath = path.join(bDir, id, '.system_generated', 'logs', 'transcript.jsonl');
+    writeJsonl(tPath, [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: `Task ${id}` },
+      { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:05Z', input_tokens: 100, cache_read_tokens: 0, output_tokens: 10, tool_calls: [{ name: 'read_file', args: { Path: JSON.stringify(path.join(repo, 'index.js')) } }] },
+    ]);
+  };
+
+  const idA = '11111111-aaaa-1111-1111-111111111111';
+  const idBeta = '22222222-bbbb-2222-2222-222222222222';
+  const idSibling = '33333333-cccc-3333-3333-333333333333';
+  mkSession(brainA, idA, repoAlpha);
+  mkSession(brainA, idBeta, repoBeta);
+  mkSession(brainASibling, idSibling, repoBeta);
+
+  const cacheFile = path.join(ledgerDir, '.agy-import-cache.json');
+  const readEntries = () => JSON.parse(fs.readFileSync(cacheFile, 'utf8')).entries;
+
+  process.env.PONYTAIL_AGY_BRAIN_DIRS = `${brainA}${path.delimiter}${brainASibling}`;
+  importAllBrains({ ledgerDir, ponytailDir, allowTempWorkspaces: true });
+  assert.equal(Object.keys(readEntries()).length, 3);
+
+  // (1) Partial --brain-dir scan keeps sibling brain-a2 entry (even if brain-a2 shares brain-a prefix) while pruning vanished idA.
+  fs.rmSync(path.join(brainA, idA), { recursive: true, force: true });
+  fs.rmSync(path.join(brainASibling, idSibling), { recursive: true, force: true });
+  importAllBrains({ brainDirs: [brainA], ledgerDir, ponytailDir, allowTempWorkspaces: true });
+  let entries = readEntries();
+  assert.equal(Boolean(entries[idA]), false, 'vanished session in scanned brainA must be pruned');
+  assert.equal(Boolean(entries[idBeta]), true);
+  assert.equal(Boolean(entries[idSibling]), true, 'unscanned sibling brain-a2 must be preserved');
+  assert.ok(fs.readFileSync(path.join(ledgerDir, 'alpha.csv'), 'utf8').includes(idA.slice(0, 8)), 'CSV row must remain intact');
+
+  // (2) --project filtered CLI --import must preserve other projects/vanished entries.
+  fs.rmSync(path.join(brainA, idBeta), { recursive: true, force: true });
+  const projRes = spawnSync(
+    process.execPath,
+    ['--no-warnings', SYNC_SCRIPT, '--import', '--project', 'alpha', '--brain-dir', brainA, '--ledger-dir', ledgerDir, '--ponytail-dir', ponytailDir, '--json'],
+    { env: { ...process.env, PONYTAIL_AGY_ALLOW_TEMP: '1' }, encoding: 'utf8', timeout: 3500 },
+  );
+  assert.equal(projRes.status, 0, projRes.stderr);
+  entries = readEntries();
+  assert.equal(Boolean(entries[idBeta]), true, '--project filter must not prune cache entries');
+
+  // (3) Full --import --force via PONYTAIL_AGY_BRAIN_DIRS when sessions.size === 0 rewrites entries: {}.
+  const forceRes = spawnSync(
+    process.execPath,
+    ['--no-warnings', SYNC_SCRIPT, '--import', '--force', '--ledger-dir', ledgerDir, '--ponytail-dir', ponytailDir, '--json'],
+    { env: { ...process.env, PONYTAIL_AGY_BRAIN_DIRS: `${brainA}${path.delimiter}${brainASibling}`, PONYTAIL_AGY_ALLOW_TEMP: '1' }, encoding: 'utf8', timeout: 3500 },
+  );
+  assert.equal(forceRes.status, 0, forceRes.stderr);
+  assert.equal(JSON.parse(forceRes.stdout.trim()).sessionsFound, 0);
+  assert.deepEqual(readEntries(), {});
+  assert.ok(fs.readFileSync(path.join(ledgerDir, 'beta.csv'), 'utf8').includes(idBeta.slice(0, 8)));
+});
