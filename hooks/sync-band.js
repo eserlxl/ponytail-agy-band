@@ -1339,7 +1339,7 @@ function collectBrainSessions(brainDirs = defaultBrainDirs()) {
 
 /** Inspect configured brain directories, ledger files, and board mode without creating files or directories. */
 function inspectBandStatus(options = {}) {
-  const brainDirs = Array.isArray(options.brainDirs) && options.brainDirs.length > 0
+  const brainDirs = Array.isArray(options.brainDirs)
     ? options.brainDirs
     : defaultBrainDirs();
   const sessions = collectBrainSessions(brainDirs);

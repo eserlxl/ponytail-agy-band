@@ -1428,6 +1428,10 @@ test('CLI --help/-h prints usage and --status reports diagnostics without mutati
   const direct = inspectBandStatus({ brainDirs: [brainDir], ledgerDir: uncreatedLedger, ponytailDir });
   assert.deepEqual(direct.csvFiles, ['demo.csv']);
   assert.equal(direct.boardMode, 'ponytail');
+
+  const emptyDirect = inspectBandStatus({ brainDirs: [], ledgerDir: uncreatedLedger, ponytailDir: tmp });
+  assert.deepEqual(emptyDirect.brainDirs, []);
+  assert.equal(emptyDirect.conversationCount, 0);
 });
 
 test('withLedgerLock sweeps stale atomic write temp files and honors PONYTAIL_LOCK_TIMEOUT_MS', t => {
