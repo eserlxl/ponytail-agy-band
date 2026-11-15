@@ -1254,6 +1254,13 @@ function importAllBrains(options = {}) {
   const ledgerDir = options.ledgerDir || defaultLedgerDir();
   const ponytailDir = options.ponytailDir || defaultPonytailDir();
   const brainDirs = options.brainDirs || defaultBrainDirs();
+  const rawProjects = [
+    ...(Array.isArray(options.projects) ? options.projects : []),
+    ...(options.project ? [options.project] : []),
+  ]
+    .map(p => String(p || '').trim().toLowerCase())
+    .filter(Boolean);
+  const projectFilter = rawProjects.length > 0 ? new Set(rawProjects) : null;
 
   const metaCachePath = path.join(ledgerDir, '.agy-sessions.json');
   const sessionMeta = readJsonSafe(metaCachePath, {});
@@ -1343,8 +1350,13 @@ function importAllBrains(options = {}) {
     entries.push({ conversationId: id, project: stats.project, stats });
   }
 
+  const targetEntries = projectFilter
+    ? entries.filter(e => projectFilter.has(e.project.toLowerCase()))
+    : entries;
+  found = targetEntries.length;
+
   const { updated, boardResult } = withLedgerLock(ledgerDir, () => {
-    const rowsUpdated = entries.length > 0 ? upsertCsvRows(ledgerDir, entries) : 0;
+    const rowsUpdated = targetEntries.length > 0 ? upsertCsvRows(ledgerDir, targetEntries) : 0;
     const htmlRes = rebuildBoardHtml(ledgerDir, ponytailDir);
     return { updated: rowsUpdated, boardResult: htmlRes };
   });
@@ -1415,15 +1427,25 @@ function handleHookPayload(payload, options = {}) {
 }
 
 function parseCliArgs(argv) {
-  const opts = { importMode: false, brainDirs: [], ledgerDir: undefined, ponytailDir: undefined };
+  const opts = {
+    importMode: false,
+    json: false,
+    brainDirs: [],
+    projects: [],
+    ledgerDir: undefined,
+    ponytailDir: undefined,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--import') opts.importMode = true;
+    else if (a === '--json') opts.json = true;
     else if (a === '--brain-dir' && argv[i + 1]) opts.brainDirs.push(argv[++i]);
+    else if (a === '--project' && argv[i + 1]) opts.projects.push(argv[++i]);
     else if (a === '--ledger-dir' && argv[i + 1]) opts.ledgerDir = argv[++i];
     else if (a === '--ponytail-dir' && argv[i + 1]) opts.ponytailDir = argv[++i];
   }
   if (opts.brainDirs.length === 0) delete opts.brainDirs;
+  if (opts.projects.length === 0) delete opts.projects;
   return opts;
 }
 
@@ -1431,9 +1453,13 @@ if (require.main === module) {
   const cli = parseCliArgs(process.argv.slice(2));
   if (cli.importMode) {
     const res = importAllBrains(cli);
-    process.stdout.write(
-      `ponytail-agy-band import: ${res.sessionsFound} agy session(s) parsed, ${res.rowsUpdated} row(s) updated, ${res.totalBoardTasks} total task(s) on ${res.boardFile}\n`,
-    );
+    if (cli.json) {
+      process.stdout.write(`${JSON.stringify(res)}\n`);
+    } else {
+      process.stdout.write(
+        `ponytail-agy-band import: ${res.sessionsFound} agy session(s) parsed, ${res.rowsUpdated} row(s) updated, ${res.totalBoardTasks} total task(s) on ${res.boardFile}\n`,
+      );
+    }
     process.exit(0);
   }
 

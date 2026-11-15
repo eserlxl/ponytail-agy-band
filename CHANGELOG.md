@@ -2,6 +2,11 @@
 
 All notable changes to `ponytail-agy-band` are documented in this file.
 
+## [Unreleased]
+
+### Added
+- CLI `--import` options `--project <name>` (repeatable project filter) and `--json` (machine-readable summary output).
+
 ## [0.1.0] - 2026-11-15
 
 ### Added

@@ -1286,3 +1286,53 @@ test('estimateStepCost covers Gemini and Claude tiered pricing and CLI --import 
   assert.ok(fs.existsSync(path.join(ledgerDir, 'cli-import-repo.csv')));
   assert.ok(fs.existsSync(path.join(ledgerDir, 'board.html')));
 });
+
+test('CLI --import supports repeatable --project filters and --json output', t => {
+  const tmp = makeTmpDir('pw-agy-project-json-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+  const brainDir = path.join(tmp, 'brain');
+  const ledgerDir = path.join(tmp, 'band');
+
+  for (const [id, proj] of [
+    ['11111111-1111-1111-1111-111111111111', 'Alpha'],
+    ['22222222-2222-2222-2222-222222222222', 'beta'],
+    ['33333333-3333-3333-3333-333333333333', 'gamma'],
+  ]) {
+    const r = path.join(tmp, proj);
+    fs.mkdirSync(r, { recursive: true });
+    writeJsonl(path.join(brainDir, id, '.system_generated', 'logs', 'transcript.jsonl'), [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: `Work in ${proj}` },
+      { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:05Z', input_tokens: 100, cache_read_tokens: 0, output_tokens: 10, tool_calls: [{ name: 'read_file', args: { Path: JSON.stringify(path.join(r, 'f.js')) } }] },
+    ]);
+  }
+
+  const res = spawnSync(
+    process.execPath,
+    [
+      '--no-warnings',
+      SYNC_SCRIPT,
+      '--import',
+      '--brain-dir',
+      brainDir,
+      '--ledger-dir',
+      ledgerDir,
+      '--ponytail-dir',
+      ponytailDir,
+      '--project',
+      'alpha',
+      '--project',
+      'gamma',
+      '--json',
+    ],
+    { env: { ...process.env, PONYTAIL_AGY_ALLOW_TEMP: '1' }, encoding: 'utf8' },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  const json = JSON.parse(res.stdout.trim());
+  assert.equal(json.sessionsFound, 2);
+  assert.equal(json.rowsUpdated, 2);
+  assert.equal(json.totalBoardTasks, 2);
+  assert.equal(fs.existsSync(path.join(ledgerDir, 'Alpha.csv')), true);
+  assert.equal(fs.existsSync(path.join(ledgerDir, 'gamma.csv')), true);
+  assert.equal(fs.existsSync(path.join(ledgerDir, 'beta.csv')), false);
+});
