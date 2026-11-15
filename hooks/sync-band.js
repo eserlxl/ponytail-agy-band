@@ -84,6 +84,18 @@ function defaultPonytailDir() {
 }
 
 function defaultBrainDirs() {
+  const envDirs = (process.env.PONYTAIL_AGY_BRAIN_DIRS || '').trim();
+  if (envDirs) {
+    const dirs = [];
+    for (const raw of envDirs.split(path.delimiter)) {
+      const p = raw.trim();
+      if (!p) continue;
+      try {
+        if (fs.existsSync(p) && fs.statSync(p).isDirectory() && !dirs.includes(p)) dirs.push(p);
+      } catch {}
+    }
+    return dirs;
+  }
   const dirs = [];
   for (const name of ['antigravity-cli', 'antigravity', 'antigravity-ide']) {
     const p = path.join(os.homedir(), '.gemini', name, 'brain');
@@ -646,6 +658,8 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   let hasReply = false;
   let hasHuman = false;
   let firstHumanName = '';
+  const metaCustomLabel =
+    typeof meta.customLabel === 'string' ? meta.customLabel.replace(/\s+/g, ' ').trim().slice(0, 120) : '';
   let startedMs = NaN;
   let level = defaultPonytailLevel();
 
@@ -873,7 +887,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   return {
     startedMs,
     project,
-    name: firstHumanName,
+    name: metaCustomLabel || firstHumanName,
     costUsd,
     turns,
     agentMs,
@@ -1375,6 +1389,8 @@ function handleHookPayload(payload, options = {}) {
   const id = String(payload?.conversationId || '').trim();
   const cwd = (Array.isArray(payload?.workspacePaths) && payload.workspacePaths[0]) || payload?.cwd || '';
   const modelName = String(payload?.modelName || '').trim();
+  const rawLabel = String(payload?.customLabel || payload?.title || '').replace(/\s+/g, ' ').trim();
+  const customLabel = rawLabel ? rawLabel.slice(0, 120) : '';
 
   const allowTemp = Boolean(options.allowTempWorkspaces || process.env.PONYTAIL_AGY_ALLOW_TEMP === '1');
   const validCwd = cwd && !isIgnoredWorkspacePath(cwd, allowTemp) ? cwd : '';
@@ -1385,9 +1401,11 @@ function handleHookPayload(payload, options = {}) {
         const cache = readJsonSafe(metaCachePath, {});
         const prev = cache[id] || {};
         const prevValidCwd = prev.cwd && !isIgnoredWorkspacePath(prev.cwd, allowTemp) ? prev.cwd : '';
+        const savedLabel = customLabel || (typeof prev.customLabel === 'string' ? prev.customLabel : '');
         const nextMeta = {
           cwd: validCwd || prevValidCwd,
           modelName: modelName && !['auto', 'none'].includes(modelName.toLowerCase()) ? modelName : prev.modelName || '',
+          ...(savedLabel ? { customLabel: savedLabel } : {}),
           updatedAt: Date.now(),
         };
         cache[id] = nextMeta;

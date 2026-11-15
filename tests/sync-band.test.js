@@ -1336,3 +1336,38 @@ test('CLI --import supports repeatable --project filters and --json output', t =
   assert.equal(fs.existsSync(path.join(ledgerDir, 'gamma.csv')), true);
   assert.equal(fs.existsSync(path.join(ledgerDir, 'beta.csv')), false);
 });
+
+test('handleHookPayload persists customLabel/title and PONYTAIL_AGY_BRAIN_DIRS overrides default brain scan', t => {
+  const tmp = makeTmpDir('pw-agy-label-env-');
+  const prevEnv = process.env.PONYTAIL_AGY_BRAIN_DIRS;
+  t.after(() => {
+    if (prevEnv === undefined) delete process.env.PONYTAIL_AGY_BRAIN_DIRS;
+    else process.env.PONYTAIL_AGY_BRAIN_DIRS = prevEnv;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const ponytailDir = makePonytailFixture(tmp);
+  const b1 = path.join(tmp, 'b1');
+  const b2 = path.join(tmp, 'b2');
+  const ledgerDir = path.join(tmp, 'band');
+  const id = '44444444-4444-4444-4444-444444444444';
+  const tFile = path.join(b1, id, '.system_generated', 'logs', 'transcript.jsonl');
+  writeJsonl(tFile, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: 'Ignored prompt name' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:05Z', input_tokens: 100, cache_read_tokens: 0, output_tokens: 10, tool_calls: [] },
+  ]);
+
+  process.env.PONYTAIL_AGY_BRAIN_DIRS = [b1, b2, path.join(tmp, 'nonexistent')].join(path.delimiter);
+  handleHookPayload(
+    { hookEventName: 'SessionStart', conversationId: id, customLabel: 'Pinned  Integration\nTitle' },
+    { ledgerDir, ponytailDir, allowTempWorkspaces: true },
+  );
+  handleHookPayload(
+    { hookEventName: 'Stop', conversationId: id, transcriptPath: tFile },
+    { ledgerDir, ponytailDir, allowTempWorkspaces: true },
+  );
+  const res = importAllBrains({ ledgerDir, ponytailDir, allowTempWorkspaces: true });
+  assert.equal(res.sessionsFound, 1);
+  const csv = fs.readFileSync(path.join(ledgerDir, 'antigravity.csv'), 'utf8');
+  assert.ok(csv.includes('Pinned Integration Title'));
+  assert.ok(!csv.includes('Ignored prompt name'));
+});

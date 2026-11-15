@@ -56,6 +56,7 @@ node --no-warnings ~/.gemini/config/plugins/ponytail-agy-band/hooks/sync-band.js
 | `--json` | Emit `--import` summary as single-line JSON on stdout |
 | `PONYTAIL_BAND_DIR` | Default ledger directory override (otherwise `$XDG_CONFIG_HOME/ponytail/band`) |
 | `PONYTAIL_PLUGIN_DIR` | Installed Ponytail plugin directory override |
+| `PONYTAIL_AGY_BRAIN_DIRS` | Delimiter-separated (`:` / `;`) brain directory paths used by default `--import` scans |
 | `PONYTAIL_DEFAULT_MODE` | Fallback Ponytail level (`lite`, `full`, `ultra`, `off`) |
 
 ## Development & Testing
