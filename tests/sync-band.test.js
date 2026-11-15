@@ -1463,3 +1463,75 @@ test('withLedgerLock sweeps stale atomic write temp files and honors PONYTAIL_LO
   assert.throws(() => withLedgerLock(ledgerDir, () => {}), /Timed out waiting for ledger lock/);
   assert.ok(Date.now() - start < 1000, 'should honor PONYTAIL_LOCK_TIMEOUT_MS instead of waiting 5000ms');
 });
+
+test('importAllBrains caches unchanged transcripts across runs, invalidates on child edits, and supports --force', t => {
+  const tmp = makeTmpDir('pw-agy-import-cache-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+  const brainDir = path.join(tmp, 'brain');
+  const ledgerDir = path.join(tmp, 'band');
+  const repoDir = path.join(tmp, 'cache-proj');
+  fs.mkdirSync(repoDir, { recursive: true });
+  spawnSync('git', ['init', repoDir], { stdio: 'ignore' });
+
+  const pId = '66666666-6666-6666-6666-666666666666';
+  const cId = '77777777-7777-7777-7777-777777777777';
+  const pFile = path.join(brainDir, pId, '.system_generated', 'logs', 'transcript.jsonl');
+  const cFile = path.join(brainDir, cId, '.system_generated', 'logs', 'transcript.jsonl');
+
+  writeJsonl(pFile, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: 'Cache test' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:05Z', input_tokens: 100, cache_read_tokens: 0, output_tokens: 10, tool_calls: [{ name: 'invoke_subagent', args: {} }, { name: 'read_file', args: { Path: JSON.stringify(path.join(repoDir, 'a.js')) } }] },
+    { step_index: 2, source: 'MODEL', type: 'GENERIC', created_at: '2026-11-15T10:00:06Z', content: `Spawned subagent conversationId="${cId}"` },
+  ]);
+  writeJsonl(cFile, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:07Z', content: 'Child' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:08Z', input_tokens: 50, cache_read_tokens: 0, output_tokens: 5, tool_calls: [] },
+  ]);
+
+  let opens = 0;
+  const origOpenSync = fs.openSync;
+  fs.openSync = function (p) {
+    if (String(p).endsWith('.jsonl')) opens++;
+    return origOpenSync.apply(this, arguments);
+  };
+  try {
+    const r1 = importAllBrains({ brainDirs: [brainDir], ledgerDir, ponytailDir, allowTempWorkspaces: true });
+    assert.equal(r1.sessionsFound, 1);
+    assert.equal(r1.cachedSessions, 0);
+    assert.equal(opens, 2);
+    assert.equal(fs.existsSync(path.join(ledgerDir, '.agy-import-cache.json')), true);
+
+    opens = 0;
+    const r2 = importAllBrains({ brainDirs: [brainDir], ledgerDir, ponytailDir, allowTempWorkspaces: true });
+    assert.equal(r2.sessionsFound, 1);
+    assert.equal(r2.cachedSessions, 1);
+    assert.equal(r2.rowsUpdated, 0);
+    assert.equal(opens, 0, 'warm importAllBrains should perform 0 .jsonl opens');
+
+    // Touch child transcript with extra tokens -> must invalidate parent's rootCache.
+    opens = 0;
+    fs.appendFileSync(
+      cFile,
+      `${JSON.stringify({ step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:09Z', input_tokens: 30, cache_read_tokens: 0, output_tokens: 5, tool_calls: [] })}\n`,
+    );
+    const future = new Date(Date.now() + 2000);
+    fs.utimesSync(cFile, future, future);
+    const r3 = importAllBrains({ brainDirs: [brainDir], ledgerDir, ponytailDir, allowTempWorkspaces: true });
+    assert.equal(r3.cachedSessions, 0);
+    assert.equal(r3.rowsUpdated, 1);
+    assert.ok(opens >= 1);
+  } finally {
+    fs.openSync = origOpenSync;
+  }
+
+  const cliForce = spawnSync(
+    process.execPath,
+    ['--no-warnings', SYNC_SCRIPT, '--import', '--force', '--brain-dir', brainDir, '--ledger-dir', ledgerDir, '--ponytail-dir', ponytailDir, '--json'],
+    { env: { ...process.env, PONYTAIL_AGY_ALLOW_TEMP: '1' }, encoding: 'utf8' },
+  );
+  assert.equal(cliForce.status, 0, cliForce.stderr);
+  const parsedForce = JSON.parse(cliForce.stdout.trim());
+  assert.equal(parsedForce.sessionsFound, 1);
+  assert.equal(parsedForce.cachedSessions, 0);
+});

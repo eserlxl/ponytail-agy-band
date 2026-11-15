@@ -1322,15 +1322,15 @@ function collectBrainSessions(brainDirs = defaultBrainDirs()) {
       const compact = path.join(logsDir, 'transcript.jsonl');
       const transcriptPath = fs.existsSync(full) ? full : fs.existsSync(compact) ? compact : null;
       if (!transcriptPath) continue;
-      let mtimeMs = 0;
+      let st;
       try {
-        mtimeMs = fs.statSync(transcriptPath).mtimeMs;
+        st = fs.statSync(transcriptPath);
       } catch {
         continue;
       }
       const prev = sessions.get(id);
-      if (!prev || mtimeMs > prev.mtimeMs) {
-        sessions.set(id, { id, brainDir, transcriptPath, mtimeMs });
+      if (!prev || st.mtimeMs > prev.mtimeMs) {
+        sessions.set(id, { id, brainDir, transcriptPath, mtimeMs: st.mtimeMs, size: st.size });
       }
     }
   }
@@ -1370,6 +1370,7 @@ function importAllBrains(options = {}) {
   const ledgerDir = options.ledgerDir || defaultLedgerDir();
   const ponytailDir = options.ponytailDir || defaultPonytailDir();
   const brainDirs = options.brainDirs || defaultBrainDirs();
+  const force = Boolean(options.force);
   const rawProjects = [
     ...(Array.isArray(options.projects) ? options.projects : []),
     ...(options.project ? [options.project] : []),
@@ -1380,6 +1381,14 @@ function importAllBrains(options = {}) {
 
   const metaCachePath = path.join(ledgerDir, '.agy-sessions.json');
   const sessionMeta = readJsonSafe(metaCachePath, {});
+  const importCachePath = path.join(ledgerDir, '.agy-import-cache.json');
+  const rawImportCache = readJsonSafe(importCachePath, null);
+  const prevCacheEntries =
+    rawImportCache && rawImportCache.version === 1 && rawImportCache.entries && typeof rawImportCache.entries === 'object'
+      ? rawImportCache.entries
+      : {};
+  const nextCacheEntries = {};
+  let cacheDirty = !fs.existsSync(importCachePath) || !rawImportCache || rawImportCache.version !== 1;
   const sessions = new Map(collectBrainSessions(brainDirs).map(s => [s.id, s]));
 
   // Build parent -> child subagent graph so child conversations roll up into their parent.
@@ -1388,7 +1397,38 @@ function importAllBrains(options = {}) {
   const linksById = new Map();
   const recordCache = new Map();
   for (const [id, info] of sessions) {
-    linksById.set(id, collectChildCandidates(info.transcriptPath, id, recordCache));
+    const cached = !force ? prevCacheEntries[id] : null;
+    if (
+      cached &&
+      cached.transcriptPath === info.transcriptPath &&
+      cached.size === info.size &&
+      cached.mtimeMs === info.mtimeMs &&
+      cached.childCandidates &&
+      Array.isArray(cached.childCandidates.invokeIds) &&
+      Array.isArray(cached.childCandidates.messageIds)
+    ) {
+      linksById.set(id, {
+        invokeIds: cached.childCandidates.invokeIds,
+        messageIds: cached.childCandidates.messageIds,
+        startedMs: Number.isFinite(cached.childCandidates.startedMs) ? cached.childCandidates.startedMs : NaN,
+      });
+    } else {
+      const links = collectChildCandidates(info.transcriptPath, id, recordCache);
+      linksById.set(id, links);
+      cacheDirty = true;
+    }
+    const storedLinks = linksById.get(id);
+    nextCacheEntries[id] = {
+      transcriptPath: info.transcriptPath,
+      size: info.size,
+      mtimeMs: info.mtimeMs,
+      childCandidates: {
+        invokeIds: storedLinks.invokeIds,
+        messageIds: storedLinks.messageIds,
+        startedMs: Number.isFinite(storedLinks.startedMs) ? storedLinks.startedMs : null,
+      },
+      ...(cached && cached.rootCache ? { rootCache: cached.rootCache } : {}),
+    };
   }
   const createsCycle = (parentId, childId) => {
     let cur = parentId;
@@ -1422,37 +1462,79 @@ function importAllBrains(options = {}) {
   const gitCache = new Map();
   const projectCache = new Map();
   const entries = [];
-  let found = 0;
+  const allowTemp = Boolean(options.allowTempWorkspaces || process.env.PONYTAIL_AGY_ALLOW_TEMP === '1');
+  const envSig = `${ponytailDir}|${allowTemp}|${defaultPonytailLevel()}`;
 
   for (const [id, info] of sessions) {
     if (childToParent.has(id)) continue;
-    const childPaths = collectDescendants(id, pid => parentToChildren.get(pid)).map(
-      cid => sessions.get(cid).transcriptPath,
+    const descendantIds = collectDescendants(id, pid => parentToChildren.get(pid));
+    const childPaths = descendantIds.map(cid => sessions.get(cid).transcriptPath);
+    const childSigs = descendantIds
+      .map(cid => {
+        const cs = sessions.get(cid);
+        return `${cid}:${cs.transcriptPath}:${cs.size}:${cs.mtimeMs}`;
+      })
+      .join('|');
+    const metaSig = JSON.stringify(sessionMeta[id] || null);
+    const cached = !force ? prevCacheEntries[id] : null;
+    const rc = cached && cached.transcriptPath === info.transcriptPath && cached.size === info.size && cached.mtimeMs === info.mtimeMs
+      ? cached.rootCache
+      : null;
+    const cacheValid = Boolean(
+      rc &&
+      rc.metaSig === metaSig &&
+      rc.envSig === envSig &&
+      rc.childSigs === childSigs &&
+      Object.prototype.hasOwnProperty.call(rc, 'stats') &&
+      (rc.stats === null || (typeof rc.stats === 'object' && Number.isFinite(rc.stats.startedMs))),
     );
-    const stats = parseAgyTranscript(info.transcriptPath, sessionMeta[id] || {}, childPaths, {
-      gitCache,
-      projectCache,
-      ponytailDir,
-      allowTempWorkspaces: options.allowTempWorkspaces,
-      recordCache,
-    });
+
+    let stats;
+    let fromCache = false;
+    if (cacheValid) {
+      stats = rc.stats;
+      fromCache = true;
+    } else {
+      stats = parseAgyTranscript(info.transcriptPath, sessionMeta[id] || {}, childPaths, {
+        gitCache,
+        projectCache,
+        ponytailDir,
+        allowTempWorkspaces: options.allowTempWorkspaces,
+        recordCache,
+      });
+      nextCacheEntries[id].rootCache = { metaSig, envSig, childSigs, stats: stats || null };
+      cacheDirty = true;
+    }
     if (!stats) continue;
-    found++;
-    entries.push({ conversationId: id, project: stats.project, stats });
+    entries.push({ conversationId: id, project: stats.project, stats, fromCache });
   }
 
   const targetEntries = projectFilter
     ? entries.filter(e => projectFilter.has(e.project.toLowerCase()))
     : entries;
-  found = targetEntries.length;
+  const found = targetEntries.length;
+  const cachedSessions = targetEntries.filter(e => e.fromCache).length;
 
   const { updated, boardResult } = withLedgerLock(ledgerDir, () => {
-    const rowsUpdated = targetEntries.length > 0 ? upsertCsvRows(ledgerDir, targetEntries) : 0;
+    if (cacheDirty) {
+      const latestCache = readJsonSafe(importCachePath, null);
+      const baseEntries =
+        latestCache && latestCache.version === 1 && latestCache.entries && typeof latestCache.entries === 'object'
+          ? latestCache.entries
+          : {};
+      writeAtomic(
+        importCachePath,
+        JSON.stringify({ version: 1, entries: { ...baseEntries, ...nextCacheEntries } }),
+      );
+    }
+    const rowsToUpsert = targetEntries.map(({ conversationId, project, stats }) => ({ conversationId, project, stats }));
+    const rowsUpdated = rowsToUpsert.length > 0 ? upsertCsvRows(ledgerDir, rowsToUpsert) : 0;
     const htmlRes = rebuildBoardHtml(ledgerDir, ponytailDir);
     return { updated: rowsUpdated, boardResult: htmlRes };
   });
   return {
     sessionsFound: found,
+    cachedSessions,
     rowsUpdated: updated,
     totalBoardTasks: boardResult.totalTasks,
     boardFile: boardResult.boardFile,
@@ -1529,6 +1611,7 @@ const CLI_HELP_TEXT = [
   '',
   'Options:',
   '  --import                Scan agy brain directories, update CSVs, and rebuild board.html',
+  '  --force                 Bypass .agy-import-cache.json and re-parse all transcripts during --import',
   '  --status                Inspect detected brain dirs, ledger CSVs, and board mode (read-only)',
   '  --brain-dir <path>      Override brain directory to scan (repeatable)',
   '  --ledger-dir <path>     Override target CSV and board.html directory',
@@ -1541,6 +1624,7 @@ const CLI_HELP_TEXT = [
 function parseCliArgs(argv) {
   const opts = {
     importMode: false,
+    force: false,
     statusMode: false,
     help: false,
     json: false,
@@ -1552,6 +1636,7 @@ function parseCliArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--import') opts.importMode = true;
+    else if (a === '--force') opts.force = true;
     else if (a === '--status') opts.statusMode = true;
     else if (a === '--help' || a === '-h') opts.help = true;
     else if (a === '--json') opts.json = true;
