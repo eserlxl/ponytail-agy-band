@@ -7,9 +7,16 @@ All notable changes to `ponytail-agy-band` are documented in this file.
 ### Added
 - Incremental stat-validated transcript caching (`.agy-import-cache.json`) for `importAllBrains` / `--import`, plus `--force` rebuild option.
 - Stale atomic write temporary file cleanup (`sweepStaleTempFiles`) inside `withLedgerLock` and `PONYTAIL_LOCK_TIMEOUT_MS` lock timeout override.
-- CLI `--help` (`-h`) usage output and read-only `--status` diagnostic check mode (`inspectBandStatus`).
-- CLI `--import` options `--project <name>` (repeatable project filter) and `--json` (machine-readable summary output).
+- CLI `--help` (`-h`) usage output and read-only `--status` diagnostic check mode (`inspectBandStatus`), including Ponytail `board.ts` compile diagnostics (`boardCompileError` on load/export failures) and single-read `defaultPonytailLevel()` reuse (`defaultLevel`) across `importAllBrains`.
+- CLI `--import` options `--project <name>` (repeatable project filter) and `--json` (machine-readable summary output), plus strict CLI flag/mode validation (`parseCliArgs`) exiting fast with exit code `2` and stderr hint on unknown flags, positional args, `--option=value` syntax, missing values, or conflicting modes (`--help` precedence preserved).
 - Support for hook `customLabel`/`title` session naming persisted across `Stop` and `--import`, plus `PONYTAIL_AGY_BRAIN_DIRS` environment override.
+- `README.md` `Troubleshooting` runbook, CLI exit code documentation, and `PONYTAIL_AGY_ALLOW_TEMP` environment table entry aligned with `skills/ponytail-agy-import/SKILL.md`.
+
+### Fixed
+- `inspectBandStatus` honors explicit empty `brainDirs: []` arrays instead of falling back to default brain directories (`0ff96b9`).
+- Malformed hook stdin payloads (including UTF-8 BOM-prefixed `Stop` events) preserve `{ decision: 'allow' }` fail-open output on `Stop` turns without aborting hooks.
+- Unfiltered `importAllBrains` / `--import` scans prune vanished session entries from `.agy-import-cache.json` strictly scoped to the scanned `brainDirs` (and compact 0-session entries) while preserving `--project` and sibling-directory entries.
+- Unfiltered `importAllBrains` / `--import` scans prune expired or corrupt absent-transcript entries from `.agy-sessions.json` under `withLedgerLock` (TTL-gated) while retaining active sessions and fresh `SessionStart` metadata.
 
 ## [0.1.0] - 2026-11-15
 
