@@ -22,7 +22,9 @@ const {
   parseAgyTranscript,
   rebuildBoardHtml,
   streamJsonl,
+  sweepStaleTempFiles,
   upsertCsvRows,
+  withLedgerLock,
 } = require(SYNC_SCRIPT);
 
 function makeTmpDir(prefix) {
@@ -1426,4 +1428,38 @@ test('CLI --help/-h prints usage and --status reports diagnostics without mutati
   const direct = inspectBandStatus({ brainDirs: [brainDir], ledgerDir: uncreatedLedger, ponytailDir });
   assert.deepEqual(direct.csvFiles, ['demo.csv']);
   assert.equal(direct.boardMode, 'ponytail');
+});
+
+test('withLedgerLock sweeps stale atomic write temp files and honors PONYTAIL_LOCK_TIMEOUT_MS', t => {
+  const tmp = makeTmpDir('pw-agy-sweep-timeout-');
+  const prevTimeout = process.env.PONYTAIL_LOCK_TIMEOUT_MS;
+  t.after(() => {
+    if (prevTimeout === undefined) delete process.env.PONYTAIL_LOCK_TIMEOUT_MS;
+    else process.env.PONYTAIL_LOCK_TIMEOUT_MS = prevTimeout;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const ledgerDir = path.join(tmp, 'band');
+  fs.mkdirSync(ledgerDir, { recursive: true });
+  const staleTmp = path.join(ledgerDir, 'proj.csv.tmp.99999.1000.1');
+  const freshTmp = path.join(ledgerDir, 'proj.csv.tmp.99999.1000.2');
+  const realCsv = path.join(ledgerDir, 'proj.csv');
+  fs.writeFileSync(staleTmp, 'old', 'utf8');
+  fs.writeFileSync(freshTmp, 'new', 'utf8');
+  fs.writeFileSync(realCsv, `${CSV_HEADER}\n`, 'utf8');
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(staleTmp, past, past);
+
+  assert.equal(sweepStaleTempFiles(path.join(tmp, 'missing-dir'), 15000), 0);
+  withLedgerLock(ledgerDir, () => {});
+  assert.equal(fs.existsSync(staleTmp), false);
+  assert.equal(fs.existsSync(freshTmp), true);
+  assert.equal(fs.existsSync(realCsv), true);
+
+  const lockFile = path.join(ledgerDir, '.agy-band.lock');
+  fs.writeFileSync(lockFile, '12345\n', 'utf8');
+  process.env.PONYTAIL_LOCK_TIMEOUT_MS = '40';
+  const start = Date.now();
+  assert.throws(() => withLedgerLock(ledgerDir, () => {}), /Timed out waiting for ledger lock/);
+  assert.ok(Date.now() - start < 1000, 'should honor PONYTAIL_LOCK_TIMEOUT_MS instead of waiting 5000ms');
 });

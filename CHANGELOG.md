@@ -5,6 +5,7 @@ All notable changes to `ponytail-agy-band` are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Stale atomic write temporary file cleanup (`sweepStaleTempFiles`) inside `withLedgerLock` and `PONYTAIL_LOCK_TIMEOUT_MS` lock timeout override.
 - CLI `--help` (`-h`) usage output and read-only `--status` diagnostic check mode (`inspectBandStatus`).
 - CLI `--import` options `--project <name>` (repeatable project filter) and `--json` (machine-readable summary output).
 - Support for hook `customLabel`/`title` session naming persisted across `Stop` and `--import`, plus `PONYTAIL_AGY_BRAIN_DIRS` environment override.

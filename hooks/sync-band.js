@@ -121,6 +121,41 @@ function defaultPonytailLevel() {
 let atomicSeq = 0;
 const SLEEP_VIEW = new Int32Array(new SharedArrayBuffer(4));
 const activeLedgerLocks = new Map();
+const LOCK_STALE_MS = 15000;
+const TMP_ORPHAN_RE = /\.tmp\.\d+(?:\.|$)/;
+
+function defaultLockTimeoutMs() {
+  const raw = String(process.env.PONYTAIL_LOCK_TIMEOUT_MS || '').trim();
+  if (/^\d+$/.test(raw)) {
+    const ms = Number(raw);
+    if (Number.isSafeInteger(ms) && ms > 0) return ms;
+  }
+  return 5000;
+}
+
+/** Remove orphaned writeAtomic temporary files older than staleMs in dir. */
+function sweepStaleTempFiles(dir, staleMs = LOCK_STALE_MS) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  const cutoff = Date.now() - staleMs;
+  let removed = 0;
+  for (const name of entries) {
+    if (!TMP_ORPHAN_RE.test(name)) continue;
+    const full = path.join(dir, name);
+    try {
+      const st = fs.statSync(full);
+      if (st.isFile() && st.mtimeMs < cutoff) {
+        fs.rmSync(full, { force: true });
+        removed++;
+      }
+    } catch {}
+  }
+  return removed;
+}
 
 function writeAtomic(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -130,7 +165,7 @@ function writeAtomic(filePath, content) {
 }
 
 /** Serialize read-modify-write ledger mutations across concurrent hook/import processes. */
-function withLedgerLock(ledgerDir, fn, timeoutMs = 5000, staleMs = 15000) {
+function withLedgerLock(ledgerDir, fn, timeoutOrOpts, staleMsArg) {
   const key = path.resolve(ledgerDir);
   const depth = activeLedgerLocks.get(key) || 0;
   if (depth > 0) {
@@ -141,6 +176,12 @@ function withLedgerLock(ledgerDir, fn, timeoutMs = 5000, staleMs = 15000) {
       activeLedgerLocks.set(key, depth);
     }
   }
+
+  const opts = timeoutOrOpts && typeof timeoutOrOpts === 'object'
+    ? timeoutOrOpts
+    : { timeoutMs: timeoutOrOpts, staleMs: staleMsArg };
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : defaultLockTimeoutMs();
+  const staleMs = Number.isFinite(opts.staleMs) && opts.staleMs > 0 ? opts.staleMs : LOCK_STALE_MS;
 
   fs.mkdirSync(ledgerDir, { recursive: true });
   const lockPath = path.join(ledgerDir, '.agy-band.lock');
@@ -174,6 +215,7 @@ function withLedgerLock(ledgerDir, fn, timeoutMs = 5000, staleMs = 15000) {
 
   activeLedgerLocks.set(key, 1);
   try {
+    sweepStaleTempFiles(ledgerDir, staleMs);
     return fn();
   } finally {
     activeLedgerLocks.delete(key);
@@ -1606,6 +1648,8 @@ module.exports = {
   projectOf,
   rebuildBoardHtml,
   streamJsonl,
+  sweepStaleTempFiles,
   testsLabelFromState,
   upsertCsvRows,
+  withLedgerLock,
 };

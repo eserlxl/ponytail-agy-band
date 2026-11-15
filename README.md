@@ -59,6 +59,7 @@ node --no-warnings ~/.gemini/config/plugins/ponytail-agy-band/hooks/sync-band.js
 | `PONYTAIL_BAND_DIR` | Default ledger directory override (otherwise `$XDG_CONFIG_HOME/ponytail/band`) |
 | `PONYTAIL_PLUGIN_DIR` | Installed Ponytail plugin directory override |
 | `PONYTAIL_AGY_BRAIN_DIRS` | Delimiter-separated (`:` / `;`) brain directory paths used by default `--import` scans |
+| `PONYTAIL_LOCK_TIMEOUT_MS` | Positive integer lock wait timeout in milliseconds for ledger writes (default `5000`) |
 | `PONYTAIL_DEFAULT_MODE` | Fallback Ponytail level (`lite`, `full`, `ultra`, `off`) |
 
 ## Development & Testing
