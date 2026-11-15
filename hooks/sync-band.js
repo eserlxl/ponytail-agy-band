@@ -15,6 +15,7 @@ const CSV_HEADER =
 
 const IDLE_MS = 30 * 60000;
 const STDIN_TIMEOUT_MS = 4000;
+const SESSION_META_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const SKIP_SOURCE_DIR =
   /(^|\/)(node_modules|\.git|dist|build|out|vendor|venv|\.venv|__pycache__|coverage|\.next|target|migrations|fixtures|tests?|__tests__|spec)(\/|$)/;
 const SKIP_TEST_FILE =
@@ -1557,6 +1558,27 @@ function importAllBrains(options = {}) {
         importCachePath,
         JSON.stringify({ version: 1, entries: { ...baseEntries, ...nextCacheEntries } }),
       );
+    }
+    if (!projectFilter && !hasExplicitBrainDirs && fs.existsSync(metaCachePath)) {
+      const latestMeta = readJsonSafe(metaCachePath, null);
+      if (latestMeta && typeof latestMeta === 'object' && !Array.isArray(latestMeta)) {
+        const ttlMs = Number.isFinite(options.sessionMetaTtlMs) && options.sessionMetaTtlMs > 0
+          ? options.sessionMetaTtlMs
+          : SESSION_META_TTL_MS;
+        const nowMs = Date.now();
+        let metaPruned = false;
+        for (const [id, meta] of Object.entries(latestMeta)) {
+          if (sessions.has(id)) continue;
+          const updatedAt = meta && typeof meta === 'object' ? meta.updatedAt : NaN;
+          if (!Number.isFinite(updatedAt) || nowMs - updatedAt > ttlMs) {
+            delete latestMeta[id];
+            metaPruned = true;
+          }
+        }
+        if (metaPruned) {
+          writeAtomic(metaCachePath, JSON.stringify(latestMeta, null, 2));
+        }
+      }
     }
     const rowsToUpsert = targetEntries.map(({ conversationId, project, stats }) => ({ conversationId, project, stats }));
     const rowsUpdated = rowsToUpsert.length > 0 ? upsertCsvRows(ledgerDir, rowsToUpsert) : 0;
