@@ -5,3 +5,4 @@ coverage/
 .coverage
 *.tmp.*
 .env*
+.planwright/
