@@ -426,10 +426,18 @@ function formatBoardModel(model) {
   return cleaned ? `Agy · ${cleaned}` : 'Agy';
 }
 
-function isSourceCodeFile(filePath) {
+function isSourceCodeFile(filePath, baseRoot = '') {
   if (typeof filePath !== 'string' || !filePath) return false;
   const norm = filePath.replace(/\\/g, '/');
-  return CODE_EXT.test(norm) && !SKIP_SOURCE_DIR.test(norm) && !SKIP_TEST_FILE.test(norm);
+  if (!CODE_EXT.test(norm) || SKIP_TEST_FILE.test(norm)) return false;
+  let rel = norm;
+  if (typeof baseRoot === 'string' && baseRoot) {
+    const cleanRoot = stripWorktreeSegment(baseRoot).replace(/\\/g, '/').replace(/\/+$/, '');
+    if (cleanRoot && (norm === cleanRoot || norm.startsWith(`${cleanRoot}/`))) {
+      rel = norm.slice(cleanRoot.length + 1);
+    }
+  }
+  return !SKIP_SOURCE_DIR.test(rel);
 }
 
 function testCountsFromOutput(output) {
@@ -679,8 +687,15 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
           }
           if (tc.name === 'edit_file' || tc.name === 'write_file') {
             const target = String(unwrapArg(args.Path) || '');
-            if (isSourceCodeFile(target) && (tests.state === 'pass' || tests.state === 'fail')) {
-              tests = { state: 'stale' };
+            if (tests.state === 'pass' || tests.state === 'fail') {
+              const explicitBase =
+                meta.cwd && !isIgnoredWorkspacePath(meta.cwd, allowTemp)
+                  ? resolveGitRoot(meta.cwd, gitCache) || stripWorktreeSegment(meta.cwd)
+                  : '';
+              const baseRoot = explicitBase || resolveGitRoot(target, gitCache) || '';
+              if (isSourceCodeFile(target, baseRoot)) {
+                tests = { state: 'stale' };
+              }
             }
           }
         }

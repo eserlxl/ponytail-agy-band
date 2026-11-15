@@ -934,3 +934,62 @@ test('child subagents inherit spawn-time model across parent model switches and 
   assert.equal(stats.model, 'Agy');
   assert.ok(stats.costUsd !== null && Math.abs(stats.costUsd - 2.0) < 1e-6, `expected $2.00 got ${stats.costUsd}`);
 });
+
+test('isSourceCodeFile checks SKIP_SOURCE_DIR relative to repo root even under a /build/ parent dir', t => {
+  const tmp = makeTmpDir('pw-agy-build-parent-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+
+  const repo = path.join(tmp, 'build', 'my-app');
+  fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(repo, 'tests'), { recursive: true });
+  spawnSync('git', ['init', repo], { stdio: 'ignore' });
+  const srcFile = path.join(repo, 'src', 'index.js');
+  const testFile = path.join(repo, 'tests', 'foo.js');
+  fs.writeFileSync(srcFile, 'module.exports = 1;\n');
+  fs.writeFileSync(testFile, 'module.exports = 2;\n');
+
+  const testEditPath = path.join(tmp, 'test-only.jsonl');
+  writeJsonl(testEditPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: 'Edit test' },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:00:05Z',
+      tool_calls: [{ name: 'run_command', args: { CommandLine: '"npm test"' } }],
+    },
+    { step_index: 2, source: 'MODEL', type: 'GENERIC', created_at: '2026-11-15T10:00:10Z', content: 'Command exited with code 0.\n3 passed' },
+    {
+      step_index: 3,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:00:15Z',
+      tool_calls: [{ name: 'edit_file', args: { Path: JSON.stringify(testFile) } }],
+    },
+  ]);
+  const sTest = parseAgyTranscript(testEditPath, { cwd: repo }, [], { ponytailDir, allowTempWorkspaces: true });
+  assert.equal(sTest.tests, '3 passed');
+
+  const srcEditPath = path.join(tmp, 'src-edit.jsonl');
+  writeJsonl(srcEditPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:01:00Z', content: 'Edit src' },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:05Z',
+      tool_calls: [{ name: 'run_command', args: { CommandLine: '"npm test"' } }],
+    },
+    { step_index: 2, source: 'MODEL', type: 'GENERIC', created_at: '2026-11-15T10:01:10Z', content: 'Command exited with code 0.\n3 passed' },
+    {
+      step_index: 3,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:15Z',
+      tool_calls: [{ name: 'edit_file', args: { Path: JSON.stringify(srcFile) } }],
+    },
+  ]);
+  const sSrc = parseAgyTranscript(srcEditPath, { cwd: repo }, [], { ponytailDir, allowTempWorkspaces: true });
+  assert.equal(sSrc.tests, 'stale');
+});
