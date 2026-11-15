@@ -1712,22 +1712,31 @@ function handleHookPayload(payload, options = {}) {
     if (tPath) {
       const brainDir = path.dirname(path.dirname(path.dirname(path.dirname(tPath))));
       const recordCache = new Map();
-      const childPaths = collectDescendants(id, pid => {
+      const descendantIds = collectDescendants(id, pid => {
         const p = pid === id
           ? tPath
           : resolveBestTranscriptPath(path.join(brainDir, pid, '.system_generated', 'logs', 'transcript.jsonl'));
         return p ? discoverChildIds(p, pid, recordCache) : [];
-      })
-        .map(cid => resolveBestTranscriptPath(path.join(brainDir, cid, '.system_generated', 'logs', 'transcript.jsonl')))
-        .filter(Boolean);
+      });
+      const rolledChildren = descendantIds
+        .map(cid => ({
+          id: cid,
+          path: resolveBestTranscriptPath(path.join(brainDir, cid, '.system_generated', 'logs', 'transcript.jsonl')),
+        }))
+        .filter(c => Boolean(c.path));
+      const childPaths = rolledChildren.map(c => c.path);
       const stats = parseAgyTranscript(tPath, sessionMetaForStop, childPaths, {
         ponytailDir,
         allowTempWorkspaces: options.allowTempWorkspaces,
         recordCache,
       });
       if (stats) {
+        const selfPrefix = `${id.slice(0, 8)}-`;
+        const removePrefixes = rolledChildren
+          .map(c => `${c.id.slice(0, 8)}-`)
+          .filter(pref => pref !== selfPrefix);
         withLedgerLock(ledgerDir, () => {
-          upsertCsvRows(ledgerDir, [{ conversationId: id, project: stats.project, stats }]);
+          upsertCsvRows(ledgerDir, [{ conversationId: id, project: stats.project, stats }], { removePrefixes });
           rebuildBoardHtml(ledgerDir, ponytailDir);
         });
       }
