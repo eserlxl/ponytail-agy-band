@@ -232,6 +232,10 @@ function readJsonSafe(filePath, fallback) {
   }
 }
 
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
 const cachedClaudePrices = new Map();
 function getClaudePrices(ponytailDir) {
   const dir = ponytailDir || defaultPonytailDir();
@@ -1040,10 +1044,11 @@ function keyPrefix(key) {
   return idx >= 0 ? s.slice(0, idx + 1) : '';
 }
 
-function upsertCsvRows(ledgerDir, entries) {
+function upsertCsvRows(ledgerDir, entries, options = {}) {
   return withLedgerLock(ledgerDir, () => {
     const byFile = new Map();
     const targetFileByPrefix = new Map();
+    const removeSet = options && options.removePrefixes ? new Set(options.removePrefixes) : new Set();
 
     for (const entry of entries) {
       const file = path.join(ledgerDir, `${entry.project.replace(/[^\w.-]/g, '_')}.csv`);
@@ -1053,7 +1058,9 @@ function upsertCsvRows(ledgerDir, entries) {
     }
 
     let updated = 0;
+    const processedFiles = new Set();
     for (const [file, items] of byFile) {
+      processedFiles.add(path.resolve(file));
       let existing = '';
       try {
         existing = fs.readFileSync(file, 'utf8');
@@ -1068,7 +1075,7 @@ function upsertCsvRows(ledgerDir, entries) {
         if (prefixes.has(pref)) {
           if (!priorByPrefix.has(pref)) priorByPrefix.set(pref, []);
           priorByPrefix.get(pref).push(line);
-        } else {
+        } else if (!removeSet.has(pref)) {
           keptLines.push(line);
         }
       }
@@ -1088,8 +1095,8 @@ function upsertCsvRows(ledgerDir, entries) {
       }
     }
 
-    // Remove stale rows for moved sessions across any sibling *.csv ledger.
-    if (targetFileByPrefix.size > 0 && fs.existsSync(ledgerDir)) {
+    // Remove stale rows for moved sessions or rolled-up child conversations across sibling *.csv ledgers.
+    if ((targetFileByPrefix.size > 0 || removeSet.size > 0) && fs.existsSync(ledgerDir)) {
       let csvFiles = [];
       try {
         csvFiles = fs.readdirSync(ledgerDir).filter(f => f.endsWith('.csv'));
@@ -1100,6 +1107,9 @@ function upsertCsvRows(ledgerDir, entries) {
         const dropHere = new Set();
         for (const [pref, destFile] of targetFileByPrefix) {
           if (path.resolve(destFile) !== siblingResolved) dropHere.add(pref);
+        }
+        if (!processedFiles.has(siblingResolved)) {
+          for (const rp of removeSet) dropHere.add(rp);
         }
         if (dropHere.size === 0) continue;
         const existing = fs.readFileSync(siblingPath, 'utf8');
@@ -1396,7 +1406,7 @@ function inspectBandStatus(options = {}) {
 function importAllBrains(options = {}) {
   const ledgerDir = options.ledgerDir || defaultLedgerDir();
   const ponytailDir = options.ponytailDir || defaultPonytailDir();
-  const brainDirs = options.brainDirs || defaultBrainDirs();
+  const brainDirs = Array.isArray(options.brainDirs) ? options.brainDirs : defaultBrainDirs();
   const force = Boolean(options.force);
   const rawProjects = [
     ...(Array.isArray(options.projects) ? options.projects : []),
@@ -1407,17 +1417,16 @@ function importAllBrains(options = {}) {
   const projectFilter = rawProjects.length > 0 ? new Set(rawProjects) : null;
 
   const metaCachePath = path.join(ledgerDir, '.agy-sessions.json');
-  const sessionMeta = readJsonSafe(metaCachePath, {});
+  const rawSessionMeta = readJsonSafe(metaCachePath, {});
+  const sessionMeta = isPlainObject(rawSessionMeta) ? rawSessionMeta : {};
   const importCachePath = path.join(ledgerDir, '.agy-import-cache.json');
   const rawImportCache = readJsonSafe(importCachePath, null);
-  const prevCacheEntries =
-    rawImportCache && rawImportCache.version === 1 && rawImportCache.entries && typeof rawImportCache.entries === 'object'
-      ? rawImportCache.entries
-      : {};
+  const hasValidImportCache = Boolean(rawImportCache && rawImportCache.version === 1 && isPlainObject(rawImportCache.entries));
+  const prevCacheEntries = hasValidImportCache ? rawImportCache.entries : {};
   const nextCacheEntries = {};
-  let cacheDirty = !fs.existsSync(importCachePath) || !rawImportCache || rawImportCache.version !== 1;
+  let cacheDirty = !fs.existsSync(importCachePath) || !hasValidImportCache;
   const sessions = new Map(collectBrainSessions(brainDirs).map(s => [s.id, s]));
-  const hasExplicitBrainDirs = Array.isArray(options.brainDirs) && options.brainDirs.length > 0;
+  const hasExplicitBrainDirs = Array.isArray(options.brainDirs);
   const resolvedBrainDirs = brainDirs.map(bd => path.resolve(bd));
   const shouldPruneCacheEntry = (id, entry) => {
     if (projectFilter || sessions.has(id)) return false;
@@ -1552,7 +1561,7 @@ function importAllBrains(options = {}) {
       cacheDirty = true;
     }
     if (!stats) continue;
-    entries.push({ conversationId: id, project: stats.project, stats, fromCache });
+    entries.push({ conversationId: id, project: stats.project, stats, fromCache, descendantIds });
   }
 
   const targetEntries = projectFilter
@@ -1560,12 +1569,20 @@ function importAllBrains(options = {}) {
     : entries;
   const found = targetEntries.length;
   const cachedSessions = targetEntries.filter(e => e.fromCache).length;
+  const rootPrefixes = new Set(entries.map(e => `${e.conversationId.slice(0, 8)}-`));
+  const removePrefixes = new Set();
+  for (const e of targetEntries) {
+    for (const cid of e.descendantIds) {
+      const cp = `${cid.slice(0, 8)}-`;
+      if (!rootPrefixes.has(cp)) removePrefixes.add(cp);
+    }
+  }
 
   const { updated, boardResult } = withLedgerLock(ledgerDir, () => {
     if (cacheDirty) {
       const latestCache = readJsonSafe(importCachePath, null);
       const baseEntries =
-        latestCache && latestCache.version === 1 && latestCache.entries && typeof latestCache.entries === 'object'
+        latestCache && latestCache.version === 1 && isPlainObject(latestCache.entries)
           ? { ...latestCache.entries }
           : {};
       if (!projectFilter) {
@@ -1581,8 +1598,8 @@ function importAllBrains(options = {}) {
       );
     }
     if (!projectFilter && !hasExplicitBrainDirs && fs.existsSync(metaCachePath)) {
-      const latestMeta = readJsonSafe(metaCachePath, null);
-      if (latestMeta && typeof latestMeta === 'object' && !Array.isArray(latestMeta)) {
+      const latestMeta = readJsonSafe(metaCachePath, undefined);
+      if (isPlainObject(latestMeta)) {
         const ttlMs = Number.isFinite(options.sessionMetaTtlMs) && options.sessionMetaTtlMs > 0
           ? options.sessionMetaTtlMs
           : SESSION_META_TTL_MS;
@@ -1599,10 +1616,12 @@ function importAllBrains(options = {}) {
         if (metaPruned) {
           writeAtomic(metaCachePath, JSON.stringify(latestMeta, null, 2));
         }
+      } else if (latestMeta !== undefined) {
+        writeAtomic(metaCachePath, '{}\n');
       }
     }
     const rowsToUpsert = targetEntries.map(({ conversationId, project, stats }) => ({ conversationId, project, stats }));
-    const rowsUpdated = rowsToUpsert.length > 0 ? upsertCsvRows(ledgerDir, rowsToUpsert) : 0;
+    const rowsUpdated = rowsToUpsert.length > 0 ? upsertCsvRows(ledgerDir, rowsToUpsert, { removePrefixes }) : 0;
     const htmlRes = rebuildBoardHtml(ledgerDir, ponytailDir);
     return { updated: rowsUpdated, boardResult: htmlRes };
   });
@@ -1631,8 +1650,9 @@ function handleHookPayload(payload, options = {}) {
   const metaCachePath = path.join(ledgerDir, '.agy-sessions.json');
   const sessionMetaForStop = id
     ? withLedgerLock(ledgerDir, () => {
-        const cache = readJsonSafe(metaCachePath, {});
-        const prev = cache[id] || {};
+        const rawCache = readJsonSafe(metaCachePath, {});
+        const cache = isPlainObject(rawCache) ? rawCache : {};
+        const prev = isPlainObject(cache[id]) ? cache[id] : {};
         const prevValidCwd = prev.cwd && !isIgnoredWorkspacePath(prev.cwd, allowTemp) ? prev.cwd : '';
         const savedLabel = customLabel || (typeof prev.customLabel === 'string' ? prev.customLabel : '');
         const nextMeta = {
