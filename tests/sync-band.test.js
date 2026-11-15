@@ -1022,3 +1022,54 @@ test('handleHookPayload keeps valid cached cwd when Stop passes ignored paths an
   const cache = JSON.parse(fs.readFileSync(path.join(ledgerDir, '.agy-sessions.json'), 'utf8'));
   assert.equal(cache[convId].cwd, repo);
 });
+
+test('CLI stdin decodes multi-byte UTF-8 sequences split across chunk writes', async t => {
+  const tmp = makeTmpDir('pw-agy-stdin-utf8-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+  const ledgerDir = path.join(tmp, 'band');
+  const repoDir = path.join(tmp, 'demo-utf8');
+  fs.mkdirSync(repoDir, { recursive: true });
+  spawnSync('git', ['init', repoDir], { stdio: 'ignore' });
+
+  const convId = '33333333-3333-3333-3333-333333333333';
+  const tPath = path.join(tmp, 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
+  const title = 'UTF8 ·🚀 title';
+  writeJsonl(tPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: title },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:05Z', input_tokens: 100, cache_read_tokens: 0, output_tokens: 10, tool_calls: [] },
+  ]);
+
+  const jsonBuf = Buffer.from(
+    JSON.stringify({
+      hookEventName: 'Stop',
+      conversationId: convId,
+      workspacePaths: [repoDir],
+      transcriptPath: tPath,
+      customLabel: title,
+    }),
+    'utf8',
+  );
+  const splitIdx = jsonBuf.indexOf(Buffer.from([0xc2, 0xb7])) + 1;
+  assert.ok(splitIdx > 1);
+
+  const child = spawn(process.execPath, ['--no-warnings', SYNC_SCRIPT], {
+    env: { ...process.env, PONYTAIL_BAND_DIR: ledgerDir, PONYTAIL_PLUGIN_DIR: ponytailDir, PONYTAIL_AGY_ALLOW_TEMP: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+  child.stdin.write(jsonBuf.subarray(0, splitIdx));
+  await new Promise(r => setTimeout(r, 15));
+  const emojiIdx = jsonBuf.indexOf(Buffer.from([0xf0, 0x9f, 0x9a, 0x80])) + 2;
+  child.stdin.write(jsonBuf.subarray(splitIdx, emojiIdx));
+  await new Promise(r => setTimeout(r, 15));
+  child.stdin.end(jsonBuf.subarray(emojiIdx));
+
+  const code = await new Promise(resolve => child.on('close', resolve));
+  assert.equal(code, 0);
+  assert.deepEqual(JSON.parse(stdout.trim()), { decision: 'allow' });
+  const csvText = fs.readFileSync(path.join(ledgerDir, 'demo-utf8.csv'), 'utf8');
+  assert.ok(csvText.includes(title), `expected ${title} in ${csvText}`);
+  assert.ok(!csvText.includes('\uFFFD'));
+});

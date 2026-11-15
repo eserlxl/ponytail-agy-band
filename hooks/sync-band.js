@@ -1375,6 +1375,7 @@ if (require.main === module) {
     fs.writeSync(1, `${JSON.stringify(out)}\n`);
   };
 
+  process.stdin.setEncoding('utf8');
   process.stdin.on('data', chunk => {
     input += chunk;
   });
