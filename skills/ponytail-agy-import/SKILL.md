@@ -12,7 +12,7 @@ Syncs Antigravity (`agy`) conversation logs (`~/.gemini/antigravity*/brain/`) in
 
 ## Command
 
-Run the importer bundled with this plugin (pass `--force` to bypass the incremental transcript cache, `--status` for a read-only environment check, or `--help` for all options):
+Run the importer bundled with this plugin (pass `--force` to bypass the incremental transcript cache, `--project <name>` to filter projects, `--json` for machine-readable output, `--status` for a read-only environment check, or `--help` for all options):
 
 ```bash
 node --no-warnings ~/.gemini/config/plugins/ponytail-agy-band/hooks/sync-band.js --import
