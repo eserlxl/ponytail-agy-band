@@ -248,25 +248,34 @@ function stripWorktreeSegment(p) {
 function resolveGitRoot(candidatePath, gitCache) {
   let d = stripWorktreeSegment(candidatePath);
   try {
-    while (d && d !== '/' && !fs.existsSync(d)) d = path.dirname(d);
-    if (!d || d === '/') return null;
+    while (d && path.dirname(d) !== d && !fs.existsSync(d)) d = path.dirname(d);
+    if (!d || path.dirname(d) === d) return null;
     if (fs.statSync(d).isFile()) d = path.dirname(d);
   } catch {
     return null;
   }
-  if (!d || d === '/') return null;
+  if (!d || path.dirname(d) === d) return null;
+  if (!gitCache) return gitCommonRoot(d);
   if (!gitCache.has(d)) {
     gitCache.set(d, gitCommonRoot(d));
   }
   return gitCache.get(d);
 }
 
-function projectOf(cwd, cache) {
+function projectOf(cwd, cache, gitCache) {
   if (!cwd) return 'antigravity';
   if (!cache.has(cwd)) {
-    let root = stripWorktreeSegment(cwd);
-    if (fs.existsSync(root)) {
-      root = gitCommonRoot(root) || root;
+    const clean = stripWorktreeSegment(cwd);
+    let root = clean;
+    if (fs.existsSync(clean)) {
+      root = resolveGitRoot(clean, gitCache) || clean;
+    } else {
+      let probe = clean;
+      while (probe && path.dirname(probe) !== probe && !fs.existsSync(probe)) {
+        probe = path.dirname(probe);
+      }
+      const gitRoot = probe && path.dirname(probe) !== probe ? resolveGitRoot(probe, gitCache) : null;
+      if (gitRoot) root = gitRoot;
     }
     const base = path.basename(root.replace(/[\\/]+$/, ''));
     cache.set(cwd, base || 'antigravity');
@@ -276,10 +285,24 @@ function projectOf(cwd, cache) {
 
 function isIgnoredWorkspacePath(p, allowTempWorkspaces = false) {
   if (typeof p !== 'string' || !path.isAbsolute(p)) return true;
-  if (p.includes('/.gemini/')) return true;
-  if (!allowTempWorkspaces && (TEMP_PREFIXES.some(t => p.startsWith(t)) || p === '/tmp')) return true;
-  if (SYSTEM_SKIP_PREFIXES.some(s => p.startsWith(s))) return true;
-  if (p === '/' || p === '/home' || p === os.homedir()) return true;
+  const trimmed = p.length > 1 ? p.replace(/[\\/]+$/, '') : p;
+  if (!trimmed) return true;
+  const norm = trimmed.replace(/\\/g, '/');
+  const home = os.homedir().replace(/\\/g, '/').replace(/\/+$/, '');
+  if (norm === '/' || norm === '/home' || norm === home) return true;
+  if (norm.includes('/.gemini/') || norm.endsWith('/.gemini')) return true;
+  const withSlash = `${norm}/`;
+  if (
+    !allowTempWorkspaces &&
+    (TEMP_PREFIXES.some(t => {
+      const prefix = t.replace(/\\/g, '/').replace(/\/+$/, '');
+      return prefix && (norm === prefix || withSlash.startsWith(`${prefix}/`));
+    }) ||
+      norm === '/tmp')
+  ) {
+    return true;
+  }
+  if (SYSTEM_SKIP_PREFIXES.some(s => withSlash.startsWith(s))) return true;
   return false;
 }
 
@@ -617,7 +640,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
     }
     try {
       let dir = rawPath;
-      while (dir && dir !== '/' && !fs.existsSync(dir)) dir = path.dirname(dir);
+      while (dir && path.dirname(dir) !== dir && !fs.existsSync(dir)) dir = path.dirname(dir);
       if (!dir || isIgnoredWorkspacePath(dir, allowTemp)) return;
       if (fs.statSync(dir).isFile()) dir = path.dirname(dir);
       if (isIgnoredWorkspacePath(dir, allowTemp)) return;
@@ -1264,13 +1287,17 @@ function handleHookPayload(payload, options = {}) {
   const cwd = (Array.isArray(payload?.workspacePaths) && payload.workspacePaths[0]) || payload?.cwd || '';
   const modelName = String(payload?.modelName || '').trim();
 
+  const allowTemp = Boolean(options.allowTempWorkspaces || process.env.PONYTAIL_AGY_ALLOW_TEMP === '1');
+  const validCwd = cwd && !isIgnoredWorkspacePath(cwd, allowTemp) ? cwd : '';
+
   const metaCachePath = path.join(ledgerDir, '.agy-sessions.json');
   const sessionMetaForStop = id
     ? withLedgerLock(ledgerDir, () => {
         const cache = readJsonSafe(metaCachePath, {});
         const prev = cache[id] || {};
+        const prevValidCwd = prev.cwd && !isIgnoredWorkspacePath(prev.cwd, allowTemp) ? prev.cwd : '';
         const nextMeta = {
-          cwd: cwd || prev.cwd || '',
+          cwd: validCwd || prevValidCwd,
           modelName: modelName && !['auto', 'none'].includes(modelName.toLowerCase()) ? modelName : prev.modelName || '',
           updatedAt: Date.now(),
         };

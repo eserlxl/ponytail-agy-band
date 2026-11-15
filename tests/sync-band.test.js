@@ -993,3 +993,32 @@ test('isSourceCodeFile checks SKIP_SOURCE_DIR relative to repo root even under a
   const sSrc = parseAgyTranscript(srcEditPath, { cwd: repo }, [], { ponytailDir, allowTempWorkspaces: true });
   assert.equal(sSrc.tests, 'stale');
 });
+
+test('handleHookPayload keeps valid cached cwd when Stop passes ignored paths and projectOf resolves deleted git subdirs', t => {
+  const tmp = makeTmpDir('pw-agy-cwd-guard-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+  const ledgerDir = path.join(tmp, 'band');
+  const repo = path.join(tmp, 'real-repo');
+  fs.mkdirSync(repo, { recursive: true });
+  spawnSync('git', ['init', repo], { stdio: 'ignore' });
+
+  const { projectOf } = require(SYNC_SCRIPT);
+  assert.equal(projectOf(path.join(repo, 'missing', 'nested'), new Map()), 'real-repo');
+
+  const convId = '11111111-1111-1111-1111-111111111111';
+  handleHookPayload(
+    { hookEventName: 'SessionStart', conversationId: convId, workspacePaths: [repo] },
+    { ledgerDir, ponytailDir, allowTempWorkspaces: true },
+  );
+  handleHookPayload(
+    { hookEventName: 'Stop', conversationId: convId, workspacePaths: [`${os.homedir()}/`] },
+    { ledgerDir, ponytailDir, allowTempWorkspaces: true },
+  );
+  handleHookPayload(
+    { hookEventName: 'Stop', conversationId: convId, workspacePaths: [path.join(os.homedir(), '.gemini')] },
+    { ledgerDir, ponytailDir, allowTempWorkspaces: true },
+  );
+  const cache = JSON.parse(fs.readFileSync(path.join(ledgerDir, '.agy-sessions.json'), 'utf8'));
+  assert.equal(cache[convId].cwd, repo);
+});
