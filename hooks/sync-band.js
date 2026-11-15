@@ -928,18 +928,22 @@ function tasksFromLocal(text) {
   }));
 }
 
+function keyPrefix(key) {
+  const s = String(key || '');
+  const idx = s.lastIndexOf('-');
+  return idx >= 0 ? s.slice(0, idx + 1) : '';
+}
+
 function upsertCsvRows(ledgerDir, entries) {
   return withLedgerLock(ledgerDir, () => {
     const byFile = new Map();
-    const prefixesToDropFromFallback = new Set();
+    const targetFileByPrefix = new Map();
 
     for (const entry of entries) {
       const file = path.join(ledgerDir, `${entry.project.replace(/[^\w.-]/g, '_')}.csv`);
       if (!byFile.has(file)) byFile.set(file, []);
       byFile.get(file).push(entry);
-      if (entry.project !== 'antigravity') {
-        prefixesToDropFromFallback.add(`${entry.conversationId.slice(0, 8)}-`);
-      }
+      targetFileByPrefix.set(`${entry.conversationId.slice(0, 8)}-`, file);
     }
 
     let updated = 0;
@@ -950,34 +954,57 @@ function upsertCsvRows(ledgerDir, entries) {
       } catch {}
       const existingRows = parseCsvLocal(existing).filter((cols, idx) => !(idx === 0 && cols[0] === 'key'));
       const prefixes = new Set(items.map(it => `${it.conversationId.slice(0, 8)}-`));
+      const priorByPrefix = new Map();
       const keptLines = [];
       for (const cols of existingRows) {
-        const k = cols[0] || '';
-        if (!prefixes.has(k.slice(0, 9))) {
-          keptLines.push(cols.map(csvField).join(','));
+        const pref = keyPrefix(cols[0]);
+        const line = cols.map(csvField).join(',');
+        if (prefixes.has(pref)) {
+          if (!priorByPrefix.has(pref)) priorByPrefix.set(pref, []);
+          priorByPrefix.get(pref).push(line);
+        } else {
+          keptLines.push(line);
         }
       }
-      const newLines = items.map(it => formatCsvRow(it.conversationId, it.stats));
+      const newLines = [];
+      for (const it of items) {
+        const pref = `${it.conversationId.slice(0, 8)}-`;
+        const line = formatCsvRow(it.conversationId, it.stats);
+        newLines.push(line);
+        const prev = priorByPrefix.get(pref);
+        if (!prev || prev.length !== 1 || prev[0] !== line) {
+          updated++;
+        }
+      }
       const nextText = [CSV_HEADER, ...keptLines, ...newLines].join('\n') + '\n';
       if (nextText !== existing) {
         writeAtomic(file, nextText);
-        updated += items.length;
       }
     }
 
-    // Clean up any stale fallback rows in antigravity.csv whose project is now known.
-    if (prefixesToDropFromFallback.size > 0) {
-      const fallbackFile = path.join(ledgerDir, 'antigravity.csv');
-      if (fs.existsSync(fallbackFile)) {
-        const existing = fs.readFileSync(fallbackFile, 'utf8');
+    // Remove stale rows for moved sessions across any sibling *.csv ledger.
+    if (targetFileByPrefix.size > 0 && fs.existsSync(ledgerDir)) {
+      let csvFiles = [];
+      try {
+        csvFiles = fs.readdirSync(ledgerDir).filter(f => f.endsWith('.csv'));
+      } catch {}
+      for (const fname of csvFiles) {
+        const siblingPath = path.join(ledgerDir, fname);
+        const siblingResolved = path.resolve(siblingPath);
+        const dropHere = new Set();
+        for (const [pref, destFile] of targetFileByPrefix) {
+          if (path.resolve(destFile) !== siblingResolved) dropHere.add(pref);
+        }
+        if (dropHere.size === 0) continue;
+        const existing = fs.readFileSync(siblingPath, 'utf8');
         const rows = parseCsvLocal(existing).filter((cols, idx) => !(idx === 0 && cols[0] === 'key'));
-        const kept = rows.filter(cols => !prefixesToDropFromFallback.has((cols[0] || '').slice(0, 9)));
+        const kept = rows.filter(cols => !dropHere.has(keyPrefix(cols[0])));
         if (kept.length !== rows.length) {
           if (kept.length === 0) {
-            fs.rmSync(fallbackFile, { force: true });
+            fs.rmSync(siblingPath, { force: true });
           } else {
             const text = [CSV_HEADER, ...kept.map(c => c.map(csvField).join(','))].join('\n') + '\n';
-            writeAtomic(fallbackFile, text);
+            writeAtomic(siblingPath, text);
           }
         }
       }

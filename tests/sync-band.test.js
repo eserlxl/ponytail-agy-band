@@ -1073,3 +1073,45 @@ test('CLI stdin decodes multi-byte UTF-8 sequences split across chunk writes', a
   assert.ok(csvText.includes(title), `expected ${title} in ${csvText}`);
   assert.ok(!csvText.includes('\uFFFD'));
 });
+
+test('upsertCsvRows matches short IDs, reports exact update counts, and removes moved sibling rows', t => {
+  const tmp = makeTmpDir('pw-agy-move-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  const stats = {
+    startedMs: 1763200000000,
+    project: 'alpha',
+    name: 'Move session',
+    costUsd: 0.25,
+    turns: 1,
+    agentMs: 1000,
+    tokensTotal: 100,
+    tokensOutput: 20,
+    tests: 'not run',
+    level: 'full',
+    model: 'Agy',
+  };
+  const keepStats = { ...stats, startedMs: 1763200005000, name: 'Stay in alpha' };
+
+  assert.equal(
+    upsertCsvRows(tmp, [
+      { conversationId: 'short', project: 'alpha', stats },
+      { conversationId: 'stayid', project: 'alpha', stats: keepStats },
+    ]),
+    2,
+  );
+  // Identical repeat upsert must report 0 updated rows.
+  assert.equal(upsertCsvRows(tmp, [{ conversationId: 'short', project: 'alpha', stats }]), 0);
+  // Updating a short-ID session increments count by 1 and deduplicates rather than adding a second row.
+  assert.equal(upsertCsvRows(tmp, [{ conversationId: 'short', project: 'alpha', stats: { ...stats, turns: 2 } }]), 1);
+  assert.equal(fs.readFileSync(path.join(tmp, 'alpha.csv'), 'utf8').trim().split('\n').length, 3);
+
+  // Moving 'short' to beta prunes 'short' from alpha.csv while keeping 'stayid', then moving 'stayid' removes empty alpha.csv.
+  assert.equal(upsertCsvRows(tmp, [{ conversationId: 'short', project: 'beta', stats: { ...stats, project: 'beta' } }]), 1);
+  const alphaLines = fs.readFileSync(path.join(tmp, 'alpha.csv'), 'utf8').trim().split('\n');
+  assert.equal(alphaLines.length, 2);
+  assert.ok(!alphaLines.some(l => l.startsWith('short-')));
+
+  assert.equal(upsertCsvRows(tmp, [{ conversationId: 'stayid', project: 'beta', stats: { ...keepStats, project: 'beta' } }]), 1);
+  assert.equal(fs.existsSync(path.join(tmp, 'alpha.csv')), false);
+});
