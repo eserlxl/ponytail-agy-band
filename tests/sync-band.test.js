@@ -826,3 +826,36 @@ test('tracks background run_command test runs across non-test descriptions and m
   assert.ok(stats);
   assert.equal(stats.tests, '9 passed');
 });
+
+test('csvField quotes bare carriage returns so RFC-4180 CSV round-trip preserves single row', t => {
+  const tmp = makeTmpDir('pw-agy-csv-cr-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  const taskName = 'Fix\rCR "quoted", title';
+  upsertCsvRows(tmp, [
+    {
+      conversationId: 'aaaaaaaa-1111-2222-3333-444444444444',
+      project: 'crproj',
+      stats: {
+        startedMs: Date.parse('2026-11-15T09:00:00Z'),
+        project: 'crproj',
+        name: taskName,
+        costUsd: null,
+        turns: 1,
+        agentMs: 1000,
+        tokensTotal: 25,
+        tokensOutput: 5,
+        tests: 'not run',
+        level: 'full',
+        model: 'Agy',
+      },
+    },
+  ]);
+
+  const board = rebuildBoardHtml(tmp, path.join(tmp, 'missing-ponytail'));
+  assert.equal(board.totalTasks, 1);
+  const html = fs.readFileSync(board.boardFile, 'utf8');
+  const payload = JSON.parse(html.match(/<script type="application\/json" id="board-data">([\s\S]*?)<\/script>/)[1]);
+  assert.equal(payload.tasks.length, 1);
+  assert.equal(payload.tasks[0].name, taskName);
+});

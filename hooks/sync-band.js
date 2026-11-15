@@ -788,7 +788,7 @@ function formatStamp(ms) {
 
 function csvField(v) {
   const s = v === null || v === undefined ? '' : String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 function formatCsvRow(conversationId, stats) {
