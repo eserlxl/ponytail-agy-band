@@ -161,8 +161,15 @@ function sweepStaleTempFiles(dir, staleMs = LOCK_STALE_MS) {
 function writeAtomic(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${++atomicSeq}`;
-  fs.writeFileSync(tmp, content, 'utf8');
-  fs.renameSync(tmp, filePath);
+  try {
+    fs.writeFileSync(tmp, content, 'utf8');
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {}
+    throw err;
+  }
 }
 
 /** Serialize read-modify-write ledger mutations across concurrent hook/import processes. */
@@ -186,13 +193,22 @@ function withLedgerLock(ledgerDir, fn, timeoutOrOpts, staleMsArg) {
 
   fs.mkdirSync(ledgerDir, { recursive: true });
   const lockPath = path.join(ledgerDir, '.agy-band.lock');
+  const reapPath = `${lockPath}.reap`;
+  const lockToken = `${process.pid}:${Date.now()}:${++atomicSeq}\n`;
+  const readLockToken = p => {
+    try {
+      return fs.readFileSync(p, 'utf8');
+    } catch {
+      return '';
+    }
+  };
   const deadline = Date.now() + timeoutMs;
   let acquired = false;
   while (true) {
     try {
       const fd = fs.openSync(lockPath, 'wx');
       try {
-        fs.writeSync(fd, `${process.pid}\n`);
+        fs.writeSync(fd, lockToken);
       } finally {
         fs.closeSync(fd);
       }
@@ -200,13 +216,35 @@ function withLedgerLock(ledgerDir, fn, timeoutOrOpts, staleMsArg) {
       break;
     } catch (err) {
       if (err && err.code !== 'EEXIST') throw err;
+      let reaped = false;
       try {
         const st = fs.statSync(lockPath);
         if (Date.now() - st.mtimeMs > staleMs) {
-          fs.rmSync(lockPath, { force: true });
-          continue;
+          const staleToken = readLockToken(lockPath);
+          let reapAcquired = false;
+          try {
+            try {
+              const rst = fs.statSync(reapPath);
+              if (Date.now() - rst.mtimeMs > staleMs) fs.rmSync(reapPath, { force: true });
+            } catch {}
+            const rfd = fs.openSync(reapPath, 'wx');
+            fs.closeSync(rfd);
+            reapAcquired = true;
+            const st2 = fs.statSync(lockPath);
+            if (Date.now() - st2.mtimeMs > staleMs && readLockToken(lockPath) === staleToken) {
+              fs.rmSync(lockPath, { force: true });
+              reaped = true;
+            }
+          } catch {} finally {
+            if (reapAcquired) {
+              try {
+                fs.rmSync(reapPath, { force: true });
+              } catch {}
+            }
+          }
         }
       } catch {}
+      if (reaped) continue;
       if (Date.now() >= deadline) {
         throw new Error(`Timed out waiting for ledger lock: ${lockPath}`);
       }
@@ -220,7 +258,9 @@ function withLedgerLock(ledgerDir, fn, timeoutOrOpts, staleMsArg) {
     return fn();
   } finally {
     activeLedgerLocks.delete(key);
-    if (acquired) fs.rmSync(lockPath, { force: true });
+    if (acquired && readLockToken(lockPath) === lockToken) {
+      fs.rmSync(lockPath, { force: true });
+    }
   }
 }
 
@@ -1762,6 +1802,9 @@ function parseCliArgs(argv) {
     if (opts.importMode && opts.statusMode) {
       return finalize('cannot combine --import and --status (run --help for usage)');
     }
+    if (opts.statusMode && (opts.force || opts.projects.length > 0)) {
+      return finalize('cannot combine --status with --force or --project (run --help for usage)');
+    }
     if (argv.length > 0 && !opts.importMode && !opts.statusMode) {
       return finalize('missing mode flag: specify --import or --status (run --help for usage)');
     }
@@ -1772,19 +1815,20 @@ function parseCliArgs(argv) {
 if (require.main === module) {
   const cli = parseCliArgs(process.argv.slice(2));
   if (cli.error) {
-    process.stderr.write(`ponytail-agy-band: ${cli.error}\n`);
+    fs.writeSync(2, `ponytail-agy-band: ${cli.error}\n`);
     process.exit(2);
   }
   if (cli.help) {
-    process.stdout.write(`${CLI_HELP_TEXT}\n`);
+    fs.writeSync(1, `${CLI_HELP_TEXT}\n`);
     process.exit(0);
   }
   if (cli.statusMode) {
     const status = inspectBandStatus(cli);
     if (cli.json) {
-      process.stdout.write(`${JSON.stringify(status)}\n`);
+      fs.writeSync(1, `${JSON.stringify(status)}\n`);
     } else {
-      process.stdout.write(
+      fs.writeSync(
+        1,
         [
           `ponytail-agy-band status:`,
           `  brainDirs (${status.brainDirs.length}): ${status.brainDirs.join(', ') || '(none)'}`,
@@ -1800,9 +1844,10 @@ if (require.main === module) {
   if (cli.importMode) {
     const res = importAllBrains(cli);
     if (cli.json) {
-      process.stdout.write(`${JSON.stringify(res)}\n`);
+      fs.writeSync(1, `${JSON.stringify(res)}\n`);
     } else {
-      process.stdout.write(
+      fs.writeSync(
+        1,
         `ponytail-agy-band import: ${res.sessionsFound} agy session(s) parsed, ${res.rowsUpdated} row(s) updated, ${res.totalBoardTasks} total task(s) on ${res.boardFile}\n`,
       );
     }
