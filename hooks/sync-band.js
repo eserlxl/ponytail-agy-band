@@ -703,8 +703,9 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   let firstHumanName = '';
   const metaCustomLabel =
     typeof meta.customLabel === 'string' ? meta.customLabel.replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+  const validLevels = new Set(['lite', 'full', 'ultra', 'off']);
   let startedMs = NaN;
-  let level = defaultPonytailLevel();
+  let level = validLevels.has(options.defaultLevel) ? options.defaultLevel : defaultPonytailLevel();
 
   const billStep = (rec, model, inExec, trackDominant) => {
     const inp = rec.input_tokens || 0;
@@ -1364,14 +1365,32 @@ function inspectBandStatus(options = {}) {
     fs.existsSync(path.join(candidatePonytailDir, 'hooks', 'band', 'board.ts')) &&
     fs.existsSync(path.join(candidatePonytailDir, 'hooks', 'band', 'logo.ts')),
   );
-  return {
+  let boardMode = 'standalone';
+  let boardCompileError = '';
+  if (hasPonytailBoard) {
+    try {
+      const board = loadPonytailBoardModule(candidatePonytailDir);
+      if (typeof board?.tasksFrom === 'function' && typeof board?.boardHtml === 'function') {
+        boardMode = 'ponytail';
+      } else {
+        boardCompileError = 'Ponytail board module missing tasksFrom or boardHtml exports';
+      }
+    } catch (err) {
+      boardCompileError = String(err?.message || err || 'Ponytail board compile error')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+  }
+  const status = {
     brainDirs,
     conversationCount: sessions.length,
     ledgerDir,
     csvFiles,
     ponytailDir: hasPonytailBoard ? candidatePonytailDir : null,
-    boardMode: hasPonytailBoard ? 'ponytail' : 'standalone',
+    boardMode,
   };
+  if (boardCompileError) status.boardCompileError = boardCompileError;
+  return status;
 }
 
 function importAllBrains(options = {}) {
@@ -1488,7 +1507,8 @@ function importAllBrains(options = {}) {
   const projectCache = new Map();
   const entries = [];
   const allowTemp = Boolean(options.allowTempWorkspaces || process.env.PONYTAIL_AGY_ALLOW_TEMP === '1');
-  const envSig = `${ponytailDir}|${allowTemp}|${defaultPonytailLevel()}`;
+  const defaultLevel = defaultPonytailLevel();
+  const envSig = `${ponytailDir}|${allowTemp}|${defaultLevel}`;
 
   for (const [id, info] of sessions) {
     if (childToParent.has(id)) continue;
@@ -1525,6 +1545,7 @@ function importAllBrains(options = {}) {
         projectCache,
         ponytailDir,
         allowTempWorkspaces: options.allowTempWorkspaces,
+        defaultLevel,
         recordCache,
       });
       nextCacheEntries[id].rootCache = { metaSig, envSig, childSigs, stats: stats || null };
@@ -1750,6 +1771,7 @@ if (require.main === module) {
           `  conversations: ${status.conversationCount}`,
           `  ledgerDir: ${status.ledgerDir} (${status.csvFiles.length} csv file(s))`,
           `  boardMode: ${status.boardMode}${status.ponytailDir ? ` (${status.ponytailDir})` : ''}`,
+          ...(status.boardCompileError ? [`  boardCompileError: ${status.boardCompileError}`] : []),
         ].join('\n') + '\n',
       );
     }
