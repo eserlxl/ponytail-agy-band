@@ -1721,12 +1721,16 @@ if (require.main === module) {
     if (done) return;
     done = true;
     let out = {};
+    const stripped = input.replace(/^\uFEFF/, '');
     try {
-      const payload = JSON.parse(input.replace(/^\uFEFF/, '') || '{}');
+      const payload = JSON.parse(stripped || '{}');
       hookEventName = String(payload?.hookEventName || '');
       out = handleHookPayload(payload);
     } catch {
-      out = hookEventName === 'Stop' ? { decision: 'allow' } : {};
+      const isStop =
+        hookEventName === 'Stop' ||
+        /^\s*\{[\s\S]*"hookEventName"\s*:\s*"Stop"/.test(stripped);
+      out = isStop ? { decision: 'allow' } : {};
     }
     fs.writeSync(1, `${JSON.stringify(out)}\n`);
   };
