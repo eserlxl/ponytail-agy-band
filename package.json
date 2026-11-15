@@ -1,0 +1,46 @@
+{
+  "name": "ponytail-agy-band",
+  "version": "0.1.0",
+  "description": "Syncs Antigravity (agy) sessions, tokens, agent time, test status, and estimated API costs into Ponytail's local Board (~/.config/ponytail/band/board.html).",
+  "private": false,
+  "license": "GPL-3.0-or-later",
+  "author": {
+    "name": "Eser KUBALI",
+    "url": "https://github.com/eserlxl"
+  },
+  "homepage": "https://github.com/eserlxl/ponytail-agy-band",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eserlxl/ponytail-agy-band.git"
+  },
+  "bugs": {
+    "url": "https://github.com/eserlxl/ponytail-agy-band/issues"
+  },
+  "keywords": [
+    "antigravity",
+    "agy",
+    "ponytail",
+    "board",
+    "dashboard",
+    "telemetry",
+    "tokens",
+    "hooks"
+  ],
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "test": "node --no-warnings --test tests/*.test.js",
+    "import": "node --no-warnings ./hooks/sync-band.js --import"
+  },
+  "files": [
+    "assets/",
+    "hooks/",
+    "skills/",
+    "hooks.json",
+    "plugin.json",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ]
+}

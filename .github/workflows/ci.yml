@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: ["22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Validate JSON manifests
+        run: node -e "const fs=require('fs'); ['plugin.json','hooks.json','package.json'].forEach(f => JSON.parse(fs.readFileSync(f, 'utf8')));"
+
+      - name: Check for hardcoded user home paths
+        run: |
+          node -e "
+            const fs = require('fs');
+            const { execFileSync } = require('child_process');
+            const files = execFileSync('git', ['ls-files'], { encoding: 'utf8' }).trim().split(/\r?\n/).filter(Boolean);
+            const bad = new RegExp('/(?:home|Users)/[A-Za-z0-9._-]+/');
+            for (const f of files) {
+              const txt = fs.readFileSync(f, 'utf8');
+              if (bad.test(txt)) {
+                console.error('Hardcoded user home path found in:', f);
+                process.exit(1);
+              }
+            }
+          "
+
+      - name: Run unit tests
+        run: npm test
