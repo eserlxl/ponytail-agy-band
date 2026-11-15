@@ -685,7 +685,7 @@ test('rebuildBoardHtml falls back cleanly when Ponytail is not installed (standa
   const secondStats = {
     startedMs: Date.parse('2026-11-15T10:00:00Z'),
     project: 'beta',
-    name: 'Follow-up fallback task',
+    name: 'Fix $& $$ and $1 fallback task',
     costUsd: 1.1,
     turns: 3,
     agentMs: 180_000,
@@ -705,6 +705,6 @@ test('rebuildBoardHtml falls back cleanly when Ponytail is not installed (standa
   assert.equal(updatedPayload.tasks.length, 2);
   assert.deepEqual(
     updatedPayload.tasks.map(task => task.name).sort(),
-    ['Follow-up fallback task', 'Initial standalone task'],
+    ['Fix $& $$ and $1 fallback task', 'Initial standalone task'],
   );
 });

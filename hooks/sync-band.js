@@ -1023,7 +1023,7 @@ function rebuildBoardHtml(ledgerDir, ponytailDir = defaultPonytailDir()) {
     if (fs.existsSync(boardFile)) {
       const current = fs.readFileSync(boardFile, 'utf8');
       if (BOARD_DATA_RE.test(current)) {
-        const updated = current.replace(BOARD_DATA_RE, `$1${payload}$2`);
+        const updated = current.replace(BOARD_DATA_RE, (_, open, close) => `${open}${payload}${close}`);
         writeAtomic(boardFile, updated);
         return { boardFile, totalTasks: tasks.length, renderer: 'fallback' };
       }
