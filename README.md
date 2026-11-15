@@ -63,6 +63,8 @@ node --no-warnings ~/.gemini/config/plugins/ponytail-agy-band/hooks/sync-band.js
 | `PONYTAIL_LOCK_TIMEOUT_MS` | Positive integer lock wait timeout in milliseconds for ledger writes (default `5000`) |
 | `PONYTAIL_DEFAULT_MODE` | Fallback Ponytail level (`lite`, `full`, `ultra`, `off`) |
 
+CLI exit codes: `0` on normal completion (`-h`/`--help`, `--import`, `--status`, or stdin hook mode with no arguments), or `2` on invalid/unknown flags, positional arguments, `--option=value` syntax (use space-separated `--option <value>`), missing values, or conflicting/incomplete mode combinations.
+
 ## Development & Testing
 
 ```bash
