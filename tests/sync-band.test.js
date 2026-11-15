@@ -1240,3 +1240,49 @@ test('importAllBrains and Stop open each .jsonl transcript file only once', t =>
     fs.openSync = origOpenSync;
   }
 });
+
+test('estimateStepCost covers Gemini and Claude tiered pricing and CLI --import runs end-to-end', t => {
+  const tmp = makeTmpDir('pw-agy-tiers-cli-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+
+  const approx = (actual, expected, label) => {
+    assert.ok(actual !== null && Math.abs(actual - expected) < 1e-6, `${label}: expected ${expected}, got ${actual}`);
+  };
+
+  approx(estimateStepCost('gemini-3.8-flash-high', false, 1_000_000, 1_000_000, 1_000_000, ponytailDir), 4.575, 'gemini-3.8-flash');
+  approx(estimateStepCost('gemini-3.5-flash-lite', false, 1_000_000, 1_000_000, 1_000_000, ponytailDir), 2.83, 'gemini-3.5-flash-lite');
+  approx(estimateStepCost('gemini-3.1-flash-lite', false, 1_000_000, 1_000_000, 1_000_000, ponytailDir), 1.775, 'gemini-3.1-flash-lite');
+  approx(estimateStepCost('gemini-3.1-pro-high', false, 100_000, 100_000, 1_000_000, ponytailDir), 12.22, 'gemini-3.1-pro <=200k');
+  approx(estimateStepCost('gemini-3.1-pro-high', false, 200_000, 100_000, 1_000_000, ponytailDir), 18.84, 'gemini-3.1-pro >200k');
+  approx(estimateStepCost('gemini-2.5-pro', false, 1_000_000, 1_000_000, 1_000_000, ponytailDir), 11.375, 'gemini-2.5-pro');
+  approx(estimateStepCost('gemini-2.5-flash', false, 1_000_000, 1_000_000, 1_000_000, ponytailDir), 2.83, 'gemini-2.5-flash');
+  approx(estimateStepCost('claude-haiku-5-5', false, 50_000, 50_000, 1_000_000, ponytailDir), 0.5055, 'claude-haiku-5-5 <=100k');
+  approx(estimateStepCost('claude-haiku-5-5', false, 100_000, 50_000, 1_000_000, ponytailDir), 2.5525, 'claude-haiku-5-5 >100k');
+
+  const brainDir = path.join(tmp, 'brain');
+  const ledgerDir = path.join(tmp, 'band');
+  const repoDir = path.join(tmp, 'cli-import-repo');
+  fs.mkdirSync(repoDir, { recursive: true });
+  spawnSync('git', ['init', repoDir], { stdio: 'ignore' });
+
+  const convId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const tFile = path.join(brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
+  writeJsonl(tFile, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: 'Run CLI import' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:10Z', input_tokens: 100_000, cache_read_tokens: 0, output_tokens: 10_000, tool_calls: [{ name: 'read_file', args: { Path: JSON.stringify(path.join(repoDir, 'a.js')) } }] },
+  ]);
+
+  const res = spawnSync(
+    process.execPath,
+    ['--no-warnings', SYNC_SCRIPT, '--import', '--brain-dir', brainDir, '--ledger-dir', ledgerDir, '--ponytail-dir', ponytailDir],
+    {
+      env: { ...process.env, PONYTAIL_AGY_ALLOW_TEMP: '1' },
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /ponytail-agy-band import: 1 agy session\(s\) parsed, 1 row\(s\) updated, 1 total task\(s\)/);
+  assert.ok(fs.existsSync(path.join(ledgerDir, 'cli-import-repo.csv')));
+  assert.ok(fs.existsSync(path.join(ledgerDir, 'board.html')));
+});
