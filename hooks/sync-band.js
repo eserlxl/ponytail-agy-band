@@ -1337,6 +1337,13 @@ function collectBrainSessions(brainDirs = defaultBrainDirs()) {
   return [...sessions.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
+/** Return true when `childPath` resolves cleanly inside `parentDir`. */
+function isPathInsideDir(childPath, parentDir) {
+  if (typeof childPath !== 'string' || typeof parentDir !== 'string' || !childPath || !parentDir) return false;
+  const rel = path.relative(path.resolve(parentDir), path.resolve(childPath));
+  return Boolean(rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
 /** Inspect configured brain directories, ledger files, and board mode without creating files or directories. */
 function inspectBandStatus(options = {}) {
   const brainDirs = Array.isArray(options.brainDirs)
@@ -1390,6 +1397,23 @@ function importAllBrains(options = {}) {
   const nextCacheEntries = {};
   let cacheDirty = !fs.existsSync(importCachePath) || !rawImportCache || rawImportCache.version !== 1;
   const sessions = new Map(collectBrainSessions(brainDirs).map(s => [s.id, s]));
+  const hasExplicitBrainDirs = Array.isArray(options.brainDirs) && options.brainDirs.length > 0;
+  const resolvedBrainDirs = brainDirs.map(bd => path.resolve(bd));
+  const shouldPruneCacheEntry = (id, entry) => {
+    if (projectFilter || sessions.has(id)) return false;
+    const tp = entry && typeof entry.transcriptPath === 'string' ? entry.transcriptPath : '';
+    if (!tp) return false;
+    if (resolvedBrainDirs.some(bd => isPathInsideDir(tp, bd))) return true;
+    return !hasExplicitBrainDirs && force && !fs.existsSync(tp);
+  };
+  if (!projectFilter && !cacheDirty) {
+    for (const [id, entry] of Object.entries(prevCacheEntries)) {
+      if (shouldPruneCacheEntry(id, entry)) {
+        cacheDirty = true;
+        break;
+      }
+    }
+  }
 
   // Build parent -> child subagent graph so child conversations roll up into their parent.
   const childToParent = new Map();
@@ -1520,8 +1544,15 @@ function importAllBrains(options = {}) {
       const latestCache = readJsonSafe(importCachePath, null);
       const baseEntries =
         latestCache && latestCache.version === 1 && latestCache.entries && typeof latestCache.entries === 'object'
-          ? latestCache.entries
+          ? { ...latestCache.entries }
           : {};
+      if (!projectFilter) {
+        for (const [id, entry] of Object.entries(baseEntries)) {
+          if (shouldPruneCacheEntry(id, entry)) {
+            delete baseEntries[id];
+          }
+        }
+      }
       writeAtomic(
         importCachePath,
         JSON.stringify({ version: 1, entries: { ...baseEntries, ...nextCacheEntries } }),
