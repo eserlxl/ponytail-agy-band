@@ -509,6 +509,80 @@ test('SessionStart, Stop hooks, and importAllBrains end-to-end flow', t => {
   assert.deepEqual(JSON.parse(cliRes.stdout.trim()), { decision: 'allow' });
 });
 
+test('send_message reply from child to parent does not cycle or drop parent on import or child Stop', t => {
+  const tmp = makeTmpDir('pw-agy-reply-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+
+  const brainDir = path.join(tmp, 'brain');
+  const ledgerDir = path.join(tmp, 'band');
+  const parentId = '11111111-1111-1111-1111-111111111111';
+  const childId = '22222222-2222-2222-2222-222222222222';
+  const pPath = path.join(brainDir, parentId, '.system_generated', 'logs', 'transcript.jsonl');
+  const cPath = path.join(brainDir, childId, '.system_generated', 'logs', 'transcript.jsonl');
+
+  writeJsonl(pPath, [
+    {
+      step_index: 0,
+      source: 'USER_EXPLICIT',
+      type: 'USER_INPUT',
+      created_at: '2026-11-15T10:00:00Z',
+      content: '<USER_REQUEST>\nParent task\n</USER_REQUEST>',
+    },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:00Z',
+      input_tokens: 100,
+      cache_read_tokens: 0,
+      output_tokens: 10,
+      tool_calls: [{ name: 'invoke_subagent', args: {} }],
+    },
+    {
+      step_index: 2,
+      source: 'MODEL',
+      type: 'GENERIC',
+      created_at: '2026-11-15T10:01:02Z',
+      content: `Subagent conversationId=${childId}`,
+    },
+  ]);
+
+  writeJsonl(cPath, [
+    {
+      step_index: 0,
+      source: 'USER_EXPLICIT',
+      type: 'USER_INPUT',
+      created_at: '2026-11-15T10:01:01Z',
+      content: 'Child task',
+    },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:05Z',
+      input_tokens: 50,
+      cache_read_tokens: 0,
+      output_tokens: 5,
+      tool_calls: [{ name: 'send_message', args: { Recipient: parentId } }],
+    },
+  ]);
+
+  const imp = importAllBrains({ brainDirs: [brainDir], ledgerDir, ponytailDir, allowTempWorkspaces: true });
+  assert.equal(imp.sessionsFound, 1);
+  assert.equal(imp.totalBoardTasks, 1);
+  const importedCsv = fs.readFileSync(path.join(ledgerDir, 'antigravity.csv'), 'utf8');
+  assert.ok(importedCsv.includes(',165,15,'), 'expected combined parent + child tokens');
+
+  const stopLedger = path.join(tmp, 'stop-band');
+  handleHookPayload(
+    { hookEventName: 'Stop', conversationId: childId, transcriptPath: cPath },
+    { ledgerDir: stopLedger, ponytailDir, allowTempWorkspaces: true },
+  );
+  const stopCsv = fs.readFileSync(path.join(stopLedger, 'antigravity.csv'), 'utf8');
+  assert.ok(stopCsv.includes(',55,5,'), 'child Stop must not roll up parent tokens');
+});
+
 test('rebuildBoardHtml falls back cleanly when Ponytail is not installed (standalone + fallback update)', t => {
   const tmp = makeTmpDir('pw-agy-standalone-');
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));

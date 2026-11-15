@@ -413,11 +413,17 @@ function applyTestOutput(testsState, outputText) {
   };
 }
 
-function discoverChildIds(transcriptPath, selfId) {
-  const children = new Set();
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return [];
+function collectChildCandidates(transcriptPath, selfId) {
+  const invokeIds = new Set();
+  const messageIds = new Set();
+  let startedMs = NaN;
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+    return { invokeIds: [], messageIds: [], startedMs };
+  }
   let expectSubagentResult = false;
   streamJsonl(transcriptPath, r => {
+    const t = r.created_at ? Date.parse(r.created_at) : NaN;
+    if (!Number.isFinite(startedMs) && Number.isFinite(t)) startedMs = t;
     if (r.type === 'PLANNER_RESPONSE') {
       const tcs = Array.isArray(r.tool_calls) ? r.tool_calls : [];
       expectSubagentResult = tcs.some(tc => tc && tc.name === 'invoke_subagent');
@@ -425,7 +431,7 @@ function discoverChildIds(transcriptPath, selfId) {
         if (tc && tc.name === 'send_message' && tc.args && tc.args.Recipient) {
           const rec = String(unwrapArg(tc.args.Recipient) || '');
           for (const u of rec.match(UUID_RE) || []) {
-            if (u !== selfId) children.add(u);
+            if (u !== selfId) messageIds.add(u);
           }
         }
       }
@@ -435,12 +441,39 @@ function discoverChildIds(transcriptPath, selfId) {
       const c = String(r.content || '');
       if (c.includes('conversationId') || c.includes('conversation://') || c.includes('Subagent')) {
         for (const u of c.match(UUID_RE) || []) {
-          if (u !== selfId) children.add(u);
+          if (u !== selfId) invokeIds.add(u);
         }
       }
       expectSubagentResult = false;
     }
   });
+  return { invokeIds: [...invokeIds], messageIds: [...messageIds], startedMs };
+}
+
+function isReverseParentTarget(selfId, selfStartedMs, targetId, targetInfo) {
+  if (!targetInfo) return true;
+  if (Array.isArray(targetInfo.invokeIds) && targetInfo.invokeIds.includes(selfId)) return true;
+  if (Number.isFinite(selfStartedMs) && Number.isFinite(targetInfo.startedMs) && targetInfo.startedMs < selfStartedMs) {
+    return true;
+  }
+  return false;
+}
+
+function discoverChildIds(transcriptPath, selfId) {
+  const selfInfo = collectChildCandidates(transcriptPath, selfId);
+  const children = new Set(selfInfo.invokeIds);
+  if (selfInfo.messageIds.length > 0 && transcriptPath) {
+    const brainDir = path.dirname(path.dirname(path.dirname(path.dirname(transcriptPath))));
+    for (const cid of selfInfo.messageIds) {
+      if (children.has(cid)) continue;
+      const targetPath = resolveBestTranscriptPath(path.join(brainDir, cid, '.system_generated', 'logs', 'transcript.jsonl'));
+      if (!targetPath) continue;
+      const targetInfo = collectChildCandidates(targetPath, cid);
+      if (!isReverseParentTarget(selfId, selfInfo.startedMs, cid, targetInfo)) {
+        children.add(cid);
+      }
+    }
+  }
   return [...children];
 }
 
@@ -1047,11 +1080,36 @@ function importAllBrains(options = {}) {
   // Build parent -> child subagent graph so child conversations roll up into their parent.
   const childToParent = new Map();
   const parentToChildren = new Map();
+  const linksById = new Map();
   for (const [id, info] of sessions) {
-    const children = discoverChildIds(info.transcriptPath, id).filter(cid => sessions.has(cid));
-    if (children.length > 0) {
-      parentToChildren.set(id, children);
-      for (const cid of children) childToParent.set(cid, id);
+    linksById.set(id, collectChildCandidates(info.transcriptPath, id));
+  }
+  const createsCycle = (parentId, childId) => {
+    let cur = parentId;
+    const seen = new Set();
+    while (cur && !seen.has(cur)) {
+      if (cur === childId) return true;
+      seen.add(cur);
+      cur = childToParent.get(cur);
+    }
+    return false;
+  };
+  const linkEdge = (parentId, childId) => {
+    if (!sessions.has(childId) || childId === parentId) return;
+    if (childToParent.has(childId) || createsCycle(parentId, childId)) return;
+    if (!parentToChildren.has(parentId)) parentToChildren.set(parentId, []);
+    parentToChildren.get(parentId).push(childId);
+    childToParent.set(childId, parentId);
+  };
+  for (const [id, links] of linksById) {
+    for (const cid of links.invokeIds) linkEdge(id, cid);
+  }
+  for (const [id, links] of linksById) {
+    for (const cid of links.messageIds) {
+      const target = linksById.get(cid);
+      if (!isReverseParentTarget(id, links.startedMs, cid, target)) {
+        linkEdge(id, cid);
+      }
     }
   }
 
