@@ -594,6 +594,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   const projectCache = options.projectCache || new Map();
   const ponytailDir = options.ponytailDir;
   const allowTemp = Boolean(options.allowTempWorkspaces || process.env.PONYTAIL_AGY_ALLOW_TEMP === '1');
+  const hasExplicitCwd = Boolean(meta.cwd && !isIgnoredWorkspacePath(meta.cwd, allowTemp));
 
   const records = [];
   const rootCounts = new Map();
@@ -636,7 +637,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   const asyncTestTasks = new Map();
 
   const scorePath = (rawPath, weight, targetMap) => {
-    if (typeof rawPath !== 'string') return;
+    if (hasExplicitCwd || typeof rawPath !== 'string') return;
     if (isIgnoredWorkspacePath(rawPath, allowTemp)) return;
     const gRoot = resolveGitRoot(rawPath, gitCache);
     if (gRoot) {
@@ -701,16 +702,20 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
         const args = tc.args && typeof tc.args === 'object' ? tc.args : {};
         if (tc.name === 'run_command') {
           const cmd = String(unwrapArg(args.CommandLine) || '');
-          const cwdArg = unwrapArg(args.Cwd);
-          if (cwdArg) scorePath(String(cwdArg), 1, cmdFallbackCounts);
-          for (const cp of extractCommandPaths(cmd)) scorePath(cp, 1, cmdFallbackCounts);
+          if (!hasExplicitCwd) {
+            const cwdArg = unwrapArg(args.Cwd);
+            if (cwdArg) scorePath(String(cwdArg), 1, cmdFallbackCounts);
+            for (const cp of extractCommandPaths(cmd)) scorePath(cp, 1, cmdFallbackCounts);
+          }
           pendingRunCmds.push({ isTest: TEST_CMD.test(cmd), cmd });
         } else {
-          const weight = tc.name === 'edit_file' || tc.name === 'write_file' ? 5 : 1;
-          for (const key of ['Path', 'SearchPath', 'DirectoryPath', 'Cwd']) {
-            if (args[key] !== undefined) {
-              const val = String(unwrapArg(args[key]) || '');
-              scorePath(val, weight, rootCounts);
+          if (!hasExplicitCwd) {
+            const weight = tc.name === 'edit_file' || tc.name === 'write_file' ? 5 : 1;
+            for (const key of ['Path', 'SearchPath', 'DirectoryPath', 'Cwd']) {
+              if (args[key] !== undefined) {
+                const val = String(unwrapArg(args[key]) || '');
+                scorePath(val, weight, rootCounts);
+              }
             }
           }
           if (tc.name === 'edit_file' || tc.name === 'write_file') {
@@ -815,12 +820,12 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
 
   // Determine project name: explicit meta.cwd > file tool root > command path root > fallback.
   let project = '';
-  if (meta.cwd && !isIgnoredWorkspacePath(meta.cwd, allowTemp)) {
-    project = projectOf(meta.cwd, projectCache);
+  if (hasExplicitCwd) {
+    project = projectOf(meta.cwd, projectCache, gitCache);
   } else {
     const pickBest = map => [...map.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
     const bestDir = pickBest(rootCounts) || pickBest(cmdFallbackCounts);
-    project = bestDir ? projectOf(bestDir, projectCache) : 'antigravity';
+    project = bestDir ? projectOf(bestDir, projectCache, gitCache) : 'antigravity';
   }
 
   const dominantModel =

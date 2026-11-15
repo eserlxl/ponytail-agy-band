@@ -1152,3 +1152,48 @@ test('getClaudePrices caches custom tariffs per resolved ponytailDir', t => {
   assert.equal(estimateStepCost('claude-custom-x', false, 1_000_000, 0, 0, d2), 20);
   assert.equal(estimateStepCost('claude-custom-x', false, 1_000_000, 0, 0, path.join(tmp, 'p1', '.')), 10);
 });
+
+test('parseAgyTranscript skips scorePath git probes when meta.cwd is valid', t => {
+  const tmp = makeTmpDir('pw-agy-skip-score-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const repo = path.join(tmp, 'explicit-repo');
+  const other = path.join(tmp, 'other-repo');
+  fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(other, 'src'), { recursive: true });
+  spawnSync('git', ['init', repo], { stdio: 'ignore' });
+  spawnSync('git', ['init', other], { stdio: 'ignore' });
+
+  const transcript = path.join(tmp, 't.jsonl');
+  writeJsonl(transcript, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: 'Go' },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:00:05Z',
+      tool_calls: [
+        { name: 'read_file', args: { Path: JSON.stringify(path.join(other, 'src', 'a.js')) } },
+        { name: 'run_command', args: { Cwd: JSON.stringify(other), CommandLine: JSON.stringify(`ls ${other}`) } },
+      ],
+    },
+  ]);
+
+  const cpMod = require('node:child_process');
+  const origSpawnSync = cpMod.spawnSync;
+  let gitCalls = 0;
+  cpMod.spawnSync = function (cmd) {
+    if (cmd === 'git') gitCalls++;
+    return origSpawnSync.apply(this, arguments);
+  };
+  try {
+    delete require.cache[require.resolve(SYNC_SCRIPT)];
+    const { parseAgyTranscript: freshParse } = require(SYNC_SCRIPT);
+    const stats = freshParse(transcript, { cwd: repo }, [], { allowTempWorkspaces: true, ponytailDir: tmp });
+    assert.equal(stats.project, 'explicit-repo');
+    assert.ok(gitCalls <= 1, `expected <= 1 git call, got ${gitCalls}`);
+  } finally {
+    cpMod.spawnSync = origSpawnSync;
+    delete require.cache[require.resolve(SYNC_SCRIPT)];
+    require(SYNC_SCRIPT);
+  }
+});
