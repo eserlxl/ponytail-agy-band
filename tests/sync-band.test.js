@@ -1592,3 +1592,88 @@ test('CLI rejects invalid flags, missing values, --*=*, orphan modifiers, and co
     assert.equal(res.stderr, '');
   }
 });
+
+test('hook stdin handles BOM Stop payloads, malformed Stop JSON, non-Stop errors, and ledger lock timeout fail-open', t => {
+  const tmp = makeTmpDir('pw-agy-stdin-failopen-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+  const ledgerDir = path.join(tmp, 'band');
+  const repoDir = path.join(tmp, 'bom-proj');
+  fs.mkdirSync(repoDir, { recursive: true });
+  spawnSync('git', ['init', repoDir], { stdio: 'ignore' });
+
+  const convId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const tPath = path.join(tmp, 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
+  writeJsonl(tPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: 'BOM Stop test' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:05Z', input_tokens: 100, cache_read_tokens: 0, output_tokens: 10, tool_calls: [] },
+  ]);
+
+  const baseEnv = {
+    ...process.env,
+    PONYTAIL_BAND_DIR: ledgerDir,
+    PONYTAIL_PLUGIN_DIR: ponytailDir,
+    PONYTAIL_AGY_ALLOW_TEMP: '1',
+  };
+
+  // (a) UTF-8 BOM-prefixed valid Stop payload persists CSV row and allows Stop.
+  const bomPayload = `\uFEFF${JSON.stringify({
+    hookEventName: 'Stop',
+    conversationId: convId,
+    workspacePaths: [repoDir],
+    transcriptPath: tPath,
+  })}`;
+  const bomRes = spawnSync(process.execPath, ['--no-warnings', SYNC_SCRIPT], {
+    input: bomPayload,
+    env: baseEnv,
+    encoding: 'utf8',
+    timeout: 3500,
+  });
+  assert.equal(bomRes.error, undefined);
+  assert.equal(bomRes.status, 0, bomRes.stderr);
+  assert.deepEqual(JSON.parse(bomRes.stdout.trim()), { decision: 'allow' });
+  const csvPath = path.join(ledgerDir, 'bom-proj.csv');
+  assert.equal(fs.existsSync(csvPath), true);
+  assert.ok(fs.readFileSync(csvPath, 'utf8').includes('BOM Stop test'));
+
+  // (b) Malformed/truncated Stop JSON still fails open with { decision: 'allow' }; non-Stop returns {}.
+  for (const malformedStop of ['{"hookEventName":"Stop","broken":', '\uFEFF{"hookEventName" : "Stop", "x":']) {
+    const res = spawnSync(process.execPath, ['--no-warnings', SYNC_SCRIPT], {
+      input: malformedStop,
+      env: baseEnv,
+      encoding: 'utf8',
+      timeout: 3500,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.deepEqual(JSON.parse(res.stdout.trim()), { decision: 'allow' });
+  }
+  const badStart = spawnSync(process.execPath, ['--no-warnings', SYNC_SCRIPT], {
+    input: '{"hookEventName":"SessionStart","broken":',
+    env: baseEnv,
+    encoding: 'utf8',
+    timeout: 3500,
+  });
+  assert.equal(badStart.status, 0, badStart.stderr);
+  assert.deepEqual(JSON.parse(badStart.stdout.trim()), {});
+
+  // (c) Active .agy-band.lock timeout during Stop still exits 0 with { decision: 'allow' }.
+  const lockPath = path.join(ledgerDir, '.agy-band.lock');
+  fs.writeFileSync(lockPath, '99999\n', 'utf8');
+  const t0 = Date.now();
+  const lockedStop = spawnSync(process.execPath, ['--no-warnings', SYNC_SCRIPT], {
+    input: JSON.stringify({
+      hookEventName: 'Stop',
+      conversationId: convId,
+      workspacePaths: [repoDir],
+      transcriptPath: tPath,
+    }),
+    env: { ...baseEnv, PONYTAIL_LOCK_TIMEOUT_MS: '40' },
+    encoding: 'utf8',
+    timeout: 3500,
+  });
+  const elapsedMs = Date.now() - t0;
+  assert.equal(lockedStop.error, undefined);
+  assert.equal(lockedStop.status, 0, lockedStop.stderr);
+  assert.deepEqual(JSON.parse(lockedStop.stdout.trim()), { decision: 'allow' });
+  assert.ok(elapsedMs < 3500, `locked Stop should fail open quickly, took ${elapsedMs}ms`);
+});
