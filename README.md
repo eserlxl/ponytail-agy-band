@@ -38,7 +38,7 @@ node --no-warnings ~/.gemini/config/plugins/ponytail-agy-band/hooks/sync-band.js
 
 ## Metrics & Pricing Rules
 
-- **Tokens & Turns**: aggregates `input_tokens`, `cache_read_tokens`, and `output_tokens` across human-driven turns (excluding slash commands such as `/ponytail ...` and `/compact` from turn count) and sums any spawned child subagents (`invoke_subagent` / `swarm`) into the parent task.
+- **Tokens & Turns**: aggregates `input_tokens`, `cache_read_tokens`, and `output_tokens` across human-driven turns that receive a model response (skipping unanswered local inputs while counting slash-invoked agent turns) and sums any spawned child subagents (`invoke_subagent` / `swarm`) into the parent task.
 - **Agent Minutes**: sums step deltas capped at a 30-minute idle threshold (`IDLE_MS`) while excluding time waiting on human input (`ask_question`).
 - **Test Status**: tracks test commands (`node --test`, `pytest`, `npm test`, `cargo test`, etc., including async background completions) and flips status to `stale` if non-test source files are subsequently edited without re-running tests.
 - **Cost Estimation**: when the active model is known (from `Model Selection` transcript updates or non-`"auto"` hook `modelName`), estimates API cost using public per-1M-token tariffs (loading Claude Code rates from installed Ponytail when present, plus Gemini `4 / 3.8 / 3.5 / 3.1 / 2.5` and phase-aware Orchestrator Carbon/Argon -> Hydrogen execution rates). When the model is unknown or `"auto"`, leaves `cost_usd` blank and labels the model `"Agy"`.
@@ -49,7 +49,7 @@ node --no-warnings ~/.gemini/config/plugins/ponytail-agy-band/hooks/sync-band.js
 | Option / Variable | Description |
 | :--- | :--- |
 | `--import` | Scan all `agy` brain directories and rebuild `~/.config/ponytail/band/board.html` |
-| `--brain-dir <path>` | Override/add a brain directory (repeatable) |
+| `--brain-dir <path>` | Override brain directories to scan (repeatable) |
 | `--ledger-dir <path>` | Override target CSV + `board.html` directory |
 | `--ponytail-dir <path>` | Override installed Ponytail plugin directory |
 | `PONYTAIL_BAND_DIR` | Default ledger directory override (otherwise `$XDG_CONFIG_HOME/ponytail/band`) |
