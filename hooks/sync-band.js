@@ -420,13 +420,13 @@ function collectChildCandidates(transcriptPath, selfId) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
     return { invokeIds: [], messageIds: [], startedMs };
   }
-  let expectSubagentResult = false;
+  let pendingInvokeCount = 0;
   streamJsonl(transcriptPath, r => {
     const t = r.created_at ? Date.parse(r.created_at) : NaN;
     if (!Number.isFinite(startedMs) && Number.isFinite(t)) startedMs = t;
     if (r.type === 'PLANNER_RESPONSE') {
       const tcs = Array.isArray(r.tool_calls) ? r.tool_calls : [];
-      expectSubagentResult = tcs.some(tc => tc && tc.name === 'invoke_subagent');
+      pendingInvokeCount = tcs.filter(tc => tc && tc.name === 'invoke_subagent').length;
       for (const tc of tcs) {
         if (tc && tc.name === 'send_message' && tc.args && tc.args.Recipient) {
           const rec = String(unwrapArg(tc.args.Recipient) || '');
@@ -437,14 +437,13 @@ function collectChildCandidates(transcriptPath, selfId) {
       }
       return;
     }
-    if (r.type === 'GENERIC' && expectSubagentResult) {
+    if (r.type === 'GENERIC' && pendingInvokeCount > 0) {
       const c = String(r.content || '');
       if (c.includes('conversationId') || c.includes('conversation://') || c.includes('Subagent')) {
-        for (const u of c.match(UUID_RE) || []) {
-          if (u !== selfId) invokeIds.add(u);
-        }
+        const uuids = (c.match(UUID_RE) || []).filter(u => u !== selfId);
+        for (const u of uuids) invokeIds.add(u);
+        if (uuids.length > 0) pendingInvokeCount--;
       }
-      expectSubagentResult = false;
     }
   });
   return { invokeIds: [...invokeIds], messageIds: [...messageIds], startedMs };
@@ -1043,6 +1042,22 @@ function resolveBestTranscriptPath(candidatePath) {
   return fs.existsSync(candidatePath) ? candidatePath : null;
 }
 
+function collectDescendants(rootId, getChildren) {
+  const out = [];
+  const seen = new Set([rootId]);
+  const queue = [...(getChildren(rootId) || [])];
+  while (queue.length > 0) {
+    const cid = queue.shift();
+    if (!cid || seen.has(cid)) continue;
+    seen.add(cid);
+    out.push(cid);
+    for (const gid of getChildren(cid) || []) {
+      if (!seen.has(gid)) queue.push(gid);
+    }
+  }
+  return out;
+}
+
 function importAllBrains(options = {}) {
   const ledgerDir = options.ledgerDir || defaultLedgerDir();
   const ponytailDir = options.ponytailDir || defaultPonytailDir();
@@ -1120,7 +1135,9 @@ function importAllBrains(options = {}) {
 
   for (const [id, info] of sessions) {
     if (childToParent.has(id)) continue;
-    const childPaths = (parentToChildren.get(id) || []).map(cid => sessions.get(cid).transcriptPath);
+    const childPaths = collectDescendants(id, pid => parentToChildren.get(pid)).map(
+      cid => sessions.get(cid).transcriptPath,
+    );
     const stats = parseAgyTranscript(info.transcriptPath, sessionMeta[id] || {}, childPaths, {
       gitCache,
       projectCache,
@@ -1168,7 +1185,12 @@ function handleHookPayload(payload, options = {}) {
     const tPath = resolveBestTranscriptPath(String(payload.transcriptPath));
     if (tPath) {
       const brainDir = path.dirname(path.dirname(path.dirname(path.dirname(tPath))));
-      const childPaths = discoverChildIds(tPath, id)
+      const childPaths = collectDescendants(id, pid => {
+        const p = pid === id
+          ? tPath
+          : resolveBestTranscriptPath(path.join(brainDir, pid, '.system_generated', 'logs', 'transcript.jsonl'));
+        return p ? discoverChildIds(p, pid) : [];
+      })
         .map(cid => resolveBestTranscriptPath(path.join(brainDir, cid, '.system_generated', 'logs', 'transcript.jsonl')))
         .filter(Boolean);
       const stats = parseAgyTranscript(tPath, cache[id] || {}, childPaths, {

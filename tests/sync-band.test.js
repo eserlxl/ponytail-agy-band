@@ -583,6 +583,74 @@ test('send_message reply from child to parent does not cycle or drop parent on i
   assert.ok(stopCsv.includes(',55,5,'), 'child Stop must not roll up parent tokens');
 });
 
+test('parallel invoke_subagent calls with interleaved tool results and grandchildren roll up transitively', t => {
+  const tmp = makeTmpDir('pw-agy-tree-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+
+  const brainDir = path.join(tmp, 'brain');
+  const ledgerDir = path.join(tmp, 'band');
+  const rootId = '11111111-1111-1111-1111-111111111111';
+  const childA = '22222222-2222-2222-2222-222222222222';
+  const childB = '33333333-3333-3333-3333-333333333333';
+  const grandId = '44444444-4444-4444-4444-444444444444';
+  const tp = id => path.join(brainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
+
+  writeJsonl(tp(rootId), [
+    {
+      step_index: 0,
+      source: 'USER_EXPLICIT',
+      type: 'USER_INPUT',
+      created_at: '2026-11-15T10:00:00Z',
+      content: '<USER_REQUEST>\nRoot task\n</USER_REQUEST>',
+    },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:00Z',
+      input_tokens: 100,
+      cache_read_tokens: 0,
+      output_tokens: 0,
+      tool_calls: [{ name: 'read_file', args: {} }, { name: 'invoke_subagent', args: {} }, { name: 'invoke_subagent', args: {} }],
+    },
+    { step_index: 2, source: 'MODEL', type: 'GENERIC', created_at: '2026-11-15T10:01:01Z', content: 'file content' },
+    { step_index: 3, source: 'MODEL', type: 'GENERIC', created_at: '2026-11-15T10:01:02Z', content: `Subagent conversationId=${childA}` },
+    { step_index: 4, source: 'MODEL', type: 'GENERIC', created_at: '2026-11-15T10:01:03Z', content: `Subagent conversationId=${childB}` },
+  ]);
+
+  writeJsonl(tp(childA), [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:01:04Z', content: 'Child A' },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:05Z',
+      input_tokens: 200,
+      cache_read_tokens: 0,
+      output_tokens: 0,
+      tool_calls: [{ name: 'invoke_subagent', args: {} }],
+    },
+    { step_index: 2, source: 'MODEL', type: 'GENERIC', created_at: '2026-11-15T10:01:06Z', content: `Subagent conversationId=${grandId}` },
+  ]);
+
+  writeJsonl(tp(childB), [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:01:04Z', content: 'Child B' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:01:05Z', input_tokens: 300, cache_read_tokens: 0, output_tokens: 0, tool_calls: [] },
+  ]);
+
+  writeJsonl(tp(grandId), [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:01:07Z', content: 'Grandchild' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:01:08Z', input_tokens: 400, cache_read_tokens: 0, output_tokens: 0, tool_calls: [] },
+  ]);
+
+  const imp = importAllBrains({ brainDirs: [brainDir], ledgerDir, ponytailDir, allowTempWorkspaces: true });
+  assert.equal(imp.sessionsFound, 1);
+  assert.equal(imp.totalBoardTasks, 1);
+  const csv = fs.readFileSync(path.join(ledgerDir, 'antigravity.csv'), 'utf8');
+  assert.ok(csv.includes(',1000,0,'), 'expected combined 100+200+300+400 tokens on root');
+});
+
 test('rebuildBoardHtml falls back cleanly when Ponytail is not installed (standalone + fallback update)', t => {
   const tmp = makeTmpDir('pw-agy-standalone-');
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
