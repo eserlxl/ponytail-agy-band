@@ -216,9 +216,13 @@ function streamJsonl(filePath, onRecord) {
   const take = line => {
     const trimmed = line.trim();
     if (!trimmed.startsWith('{')) return;
+    let record;
     try {
-      onRecord(JSON.parse(trimmed));
-    } catch {}
+      record = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    onRecord(record);
   };
   try {
     for (let n; (n = fs.readSync(fd, buf, 0, buf.length, null)) > 0; ) {
@@ -1430,6 +1434,7 @@ module.exports = {
   parseAgyTranscript,
   projectOf,
   rebuildBoardHtml,
+  streamJsonl,
   testsLabelFromState,
   upsertCsvRows,
 };

@@ -19,6 +19,7 @@ const {
   importAllBrains,
   parseAgyTranscript,
   rebuildBoardHtml,
+  streamJsonl,
   upsertCsvRows,
 } = require(SYNC_SCRIPT);
 
@@ -1114,4 +1115,23 @@ test('upsertCsvRows matches short IDs, reports exact update counts, and removes 
 
   assert.equal(upsertCsvRows(tmp, [{ conversationId: 'stayid', project: 'beta', stats: { ...keepStats, project: 'beta' } }]), 1);
   assert.equal(fs.existsSync(path.join(tmp, 'alpha.csv')), false);
+});
+
+test('streamJsonl skips malformed JSON lines while letting onRecord exceptions propagate', t => {
+  const tmp = makeTmpDir('pw-agy-stream-err-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const file = path.join(tmp, 'mixed.jsonl');
+  fs.writeFileSync(file, '{"ok":1}\n{not valid json\n{"ok":2}\n', 'utf8');
+
+  const seen = [];
+  streamJsonl(file, rec => seen.push(rec.ok));
+  assert.deepEqual(seen, [1, 2]);
+
+  assert.throws(
+    () =>
+      streamJsonl(file, rec => {
+        if (rec.ok === 2) throw new Error('callback boom');
+      }),
+    /callback boom/,
+  );
 });
