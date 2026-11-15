@@ -1197,3 +1197,46 @@ test('parseAgyTranscript skips scorePath git probes when meta.cwd is valid', t =
     require(SYNC_SCRIPT);
   }
 });
+
+test('importAllBrains and Stop open each .jsonl transcript file only once', t => {
+  const tmp = makeTmpDir('pw-agy-single-read-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+  const brainDir = path.join(tmp, 'brain');
+  const ledgerDir = path.join(tmp, 'band');
+  const pId = '11111111-1111-1111-1111-111111111111';
+  const cId = '22222222-2222-2222-2222-222222222222';
+  const pFile = path.join(brainDir, pId, '.system_generated', 'logs', 'transcript.jsonl');
+  const cFile = path.join(brainDir, cId, '.system_generated', 'logs', 'transcript.jsonl');
+
+  writeJsonl(pFile, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:00Z', content: 'Parent' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:05Z', input_tokens: 100, cache_read_tokens: 0, output_tokens: 10, tool_calls: [{ name: 'invoke_subagent', args: {} }] },
+    { step_index: 2, source: 'MODEL', type: 'GENERIC', created_at: '2026-11-15T10:00:06Z', content: `Spawned subagent conversationId="${cId}"` },
+  ]);
+  writeJsonl(cFile, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:00:07Z', content: 'Child' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:08Z', input_tokens: 50, cache_read_tokens: 0, output_tokens: 5, tool_calls: [] },
+  ]);
+
+  let opens = 0;
+  const origOpenSync = fs.openSync;
+  fs.openSync = function (p) {
+    if (String(p).endsWith('.jsonl')) opens++;
+    return origOpenSync.apply(this, arguments);
+  };
+  try {
+    const res = importAllBrains({ brainDirs: [brainDir], ledgerDir, ponytailDir, allowTempWorkspaces: true });
+    assert.equal(res.sessionsFound, 1);
+    assert.equal(opens, 2, `expected 2 opens for 2 transcripts, got ${opens}`);
+
+    opens = 0;
+    handleHookPayload(
+      { hookEventName: 'Stop', conversationId: pId, transcriptPath: pFile },
+      { ledgerDir, ponytailDir, allowTempWorkspaces: true },
+    );
+    assert.equal(opens, 2, `expected 2 opens on Stop, got ${opens}`);
+  } finally {
+    fs.openSync = origOpenSync;
+  }
+});

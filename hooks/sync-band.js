@@ -237,6 +237,33 @@ function streamJsonl(filePath, onRecord) {
   }
 }
 
+/** Stream JSONL records once per file when a per-run record cache is supplied. */
+function streamTranscriptRecords(filePath, onRecord, recordCache) {
+  if (!recordCache) {
+    streamJsonl(filePath, onRecord);
+    return;
+  }
+  const key = path.resolve(filePath);
+  let cached = recordCache.get(key);
+  if (!cached) {
+    cached = [];
+    streamJsonl(filePath, r => {
+      cached.push({
+        created_at: r.created_at,
+        source: r.source,
+        type: r.type,
+        content: r.content,
+        input_tokens: r.input_tokens,
+        cache_read_tokens: r.cache_read_tokens,
+        output_tokens: r.output_tokens,
+        tool_calls: r.tool_calls,
+      });
+    });
+    recordCache.set(key, cached);
+  }
+  for (const r of cached) onRecord(r);
+}
+
 /** Resolve the main repository root directory via `git --git-common-dir`, or null. */
 function gitCommonRoot(dir) {
   const git = spawnSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
@@ -505,7 +532,7 @@ function applyTestOutput(testsState, outputText) {
   };
 }
 
-function collectChildCandidates(transcriptPath, selfId) {
+function collectChildCandidates(transcriptPath, selfId, recordCache) {
   const invokeIds = new Set();
   const messageIds = new Set();
   let startedMs = NaN;
@@ -513,31 +540,35 @@ function collectChildCandidates(transcriptPath, selfId) {
     return { invokeIds: [], messageIds: [], startedMs };
   }
   let pendingInvokeCount = 0;
-  streamJsonl(transcriptPath, r => {
-    const t = r.created_at ? Date.parse(r.created_at) : NaN;
-    if (!Number.isFinite(startedMs) && Number.isFinite(t)) startedMs = t;
-    if (r.type === 'PLANNER_RESPONSE') {
-      const tcs = Array.isArray(r.tool_calls) ? r.tool_calls : [];
-      pendingInvokeCount = tcs.filter(tc => tc && tc.name === 'invoke_subagent').length;
-      for (const tc of tcs) {
-        if (tc && tc.name === 'send_message' && tc.args && tc.args.Recipient) {
-          const rec = String(unwrapArg(tc.args.Recipient) || '');
-          for (const u of rec.match(UUID_RE) || []) {
-            if (u !== selfId) messageIds.add(u);
+  streamTranscriptRecords(
+    transcriptPath,
+    r => {
+      const t = r.created_at ? Date.parse(r.created_at) : NaN;
+      if (!Number.isFinite(startedMs) && Number.isFinite(t)) startedMs = t;
+      if (r.type === 'PLANNER_RESPONSE') {
+        const tcs = Array.isArray(r.tool_calls) ? r.tool_calls : [];
+        pendingInvokeCount = tcs.filter(tc => tc && tc.name === 'invoke_subagent').length;
+        for (const tc of tcs) {
+          if (tc && tc.name === 'send_message' && tc.args && tc.args.Recipient) {
+            const rec = String(unwrapArg(tc.args.Recipient) || '');
+            for (const u of rec.match(UUID_RE) || []) {
+              if (u !== selfId) messageIds.add(u);
+            }
           }
         }
+        return;
       }
-      return;
-    }
-    if (r.type === 'GENERIC' && pendingInvokeCount > 0) {
-      const c = String(r.content || '');
-      if (c.includes('conversationId') || c.includes('conversation://') || c.includes('Subagent')) {
-        const uuids = (c.match(UUID_RE) || []).filter(u => u !== selfId);
-        for (const u of uuids) invokeIds.add(u);
-        if (uuids.length > 0) pendingInvokeCount--;
+      if (r.type === 'GENERIC' && pendingInvokeCount > 0) {
+        const c = String(r.content || '');
+        if (c.includes('conversationId') || c.includes('conversation://') || c.includes('Subagent')) {
+          const uuids = (c.match(UUID_RE) || []).filter(u => u !== selfId);
+          for (const u of uuids) invokeIds.add(u);
+          if (uuids.length > 0) pendingInvokeCount--;
+        }
       }
-    }
-  });
+    },
+    recordCache,
+  );
   return { invokeIds: [...invokeIds], messageIds: [...messageIds], startedMs };
 }
 
@@ -550,8 +581,8 @@ function isReverseParentTarget(selfId, selfStartedMs, targetId, targetInfo) {
   return false;
 }
 
-function discoverChildIds(transcriptPath, selfId) {
-  const selfInfo = collectChildCandidates(transcriptPath, selfId);
+function discoverChildIds(transcriptPath, selfId, recordCache) {
+  const selfInfo = collectChildCandidates(transcriptPath, selfId, recordCache);
   const children = new Set(selfInfo.invokeIds);
   if (selfInfo.messageIds.length > 0 && transcriptPath) {
     const brainDir = path.dirname(path.dirname(path.dirname(path.dirname(transcriptPath))));
@@ -559,7 +590,7 @@ function discoverChildIds(transcriptPath, selfId) {
       if (children.has(cid)) continue;
       const targetPath = resolveBestTranscriptPath(path.join(brainDir, cid, '.system_generated', 'logs', 'transcript.jsonl'));
       if (!targetPath) continue;
-      const targetInfo = collectChildCandidates(targetPath, cid);
+      const targetInfo = collectChildCandidates(targetPath, cid, recordCache);
       if (!isReverseParentTarget(selfId, selfInfo.startedMs, cid, targetInfo)) {
         children.add(cid);
       }
@@ -595,6 +626,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   const ponytailDir = options.ponytailDir;
   const allowTemp = Boolean(options.allowTempWorkspaces || process.env.PONYTAIL_AGY_ALLOW_TEMP === '1');
   const hasExplicitCwd = Boolean(meta.cwd && !isIgnoredWorkspacePath(meta.cwd, allowTemp));
+  const recordCache = options.recordCache;
 
   const records = [];
   const rootCounts = new Map();
@@ -665,8 +697,10 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
     }
   };
 
-  streamJsonl(transcriptPath, r => {
-    const t = r.created_at ? Date.parse(r.created_at) : NaN;
+  streamTranscriptRecords(
+    transcriptPath,
+    r => {
+      const t = r.created_at ? Date.parse(r.created_at) : NaN;
     if (!Number.isFinite(startedMs) && Number.isFinite(t)) startedMs = t;
 
     const isHuman = r.source === 'USER_EXPLICIT' && r.type === 'USER_INPUT';
@@ -758,7 +792,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
       t,
       toolCalls: Array.isArray(r.tool_calls) ? r.tool_calls.map(tc => tc && tc.name) : [],
     });
-  });
+  }, recordCache);
 
   if (!hasHuman || !hasReply || !Number.isFinite(startedMs)) return null;
 
@@ -767,7 +801,9 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
     if (!childPath || !fs.existsSync(childPath)) continue;
     let subModel;
     let subExec = false;
-    streamJsonl(childPath, sr => {
+    streamTranscriptRecords(
+      childPath,
+      sr => {
       const st = sr.created_at ? Date.parse(sr.created_at) : NaN;
       if (subModel === undefined && Number.isFinite(st)) {
         subModel = modelAtTime(modelTimeline, st, currentModel);
@@ -785,7 +821,9 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
         const tcs = Array.isArray(sr.tool_calls) ? sr.tool_calls : [];
         subExec = updatePhaseFromTools(tcs, subExec);
       }
-    });
+    },
+    recordCache,
+  );
   }
 
   // Compute turns & agent active time (excluding ask_question wait intervals and gaps > IDLE_MS).
@@ -1250,8 +1288,9 @@ function importAllBrains(options = {}) {
   const childToParent = new Map();
   const parentToChildren = new Map();
   const linksById = new Map();
+  const recordCache = new Map();
   for (const [id, info] of sessions) {
-    linksById.set(id, collectChildCandidates(info.transcriptPath, id));
+    linksById.set(id, collectChildCandidates(info.transcriptPath, id, recordCache));
   }
   const createsCycle = (parentId, childId) => {
     let cur = parentId;
@@ -1297,6 +1336,7 @@ function importAllBrains(options = {}) {
       projectCache,
       ponytailDir,
       allowTempWorkspaces: options.allowTempWorkspaces,
+      recordCache,
     });
     if (!stats) continue;
     found++;
@@ -1348,17 +1388,19 @@ function handleHookPayload(payload, options = {}) {
     const tPath = resolveBestTranscriptPath(String(payload.transcriptPath));
     if (tPath) {
       const brainDir = path.dirname(path.dirname(path.dirname(path.dirname(tPath))));
+      const recordCache = new Map();
       const childPaths = collectDescendants(id, pid => {
         const p = pid === id
           ? tPath
           : resolveBestTranscriptPath(path.join(brainDir, pid, '.system_generated', 'logs', 'transcript.jsonl'));
-        return p ? discoverChildIds(p, pid) : [];
+        return p ? discoverChildIds(p, pid, recordCache) : [];
       })
         .map(cid => resolveBestTranscriptPath(path.join(brainDir, cid, '.system_generated', 'logs', 'transcript.jsonl')))
         .filter(Boolean);
       const stats = parseAgyTranscript(tPath, sessionMetaForStop, childPaths, {
         ponytailDir,
         allowTempWorkspaces: options.allowTempWorkspaces,
+        recordCache,
       });
       if (stats) {
         withLedgerLock(ledgerDir, () => {
