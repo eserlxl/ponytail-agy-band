@@ -765,3 +765,64 @@ upsertCsvRows(${JSON.stringify(ledgerDir)}, [{ conversationId: ${JSON.stringify(
   assert.ok(csv.includes('Worker C'));
   assert.equal(fs.existsSync(staleLock), false);
 });
+
+test('tracks background run_command test runs across non-test descriptions and multi-task completion messages', t => {
+  const tmp = makeTmpDir('pw-agy-bg-test-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+
+  const tPath = path.join(tmp, 'bg.jsonl');
+  writeJsonl(tPath, [
+    {
+      step_index: 0,
+      source: 'USER_EXPLICIT',
+      type: 'USER_INPUT',
+      created_at: '2026-11-15T10:00:00Z',
+      content: 'Verify interleaved sync/background commands',
+    },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:00:05Z',
+      tool_calls: [
+        { name: 'run_command', args: { CommandLine: '"git status"' } },
+        { name: 'run_command', args: { CommandLine: '"npm test"' } },
+        { name: 'run_command', args: { CommandLine: '"pytest"' } },
+      ],
+    },
+    {
+      step_index: 2,
+      source: 'MODEL',
+      type: 'GENERIC',
+      created_at: '2026-11-15T10:00:06Z',
+      content: 'Tool is running as a background task with task id: t0\nTask Description: Check git status',
+    },
+    {
+      step_index: 3,
+      source: 'MODEL',
+      type: 'GENERIC',
+      created_at: '2026-11-15T10:00:07Z',
+      content: 'Tool is running as a background task with task id: t1\nTask Description: Verification run',
+    },
+    {
+      step_index: 4,
+      source: 'MODEL',
+      type: 'GENERIC',
+      created_at: '2026-11-15T10:00:08Z',
+      content: 'Command exited with code 0.\n\n7 passed in 0.1s\n',
+    },
+    {
+      step_index: 5,
+      source: 'MODEL',
+      type: 'SYSTEM_MESSAGE',
+      created_at: '2026-11-15T10:00:10Z',
+      content:
+        'Task id "t0" finished with result:\nCommand exited with code 1.\n\nTask id "t1" finished with result:\nCommand exited with code 0.\n9 passed\n</SYSTEM_MESSAGE>',
+    },
+  ]);
+
+  const stats = parseAgyTranscript(tPath, {}, [], { ponytailDir, allowTempWorkspaces: true });
+  assert.ok(stats);
+  assert.equal(stats.tests, '9 passed');
+});

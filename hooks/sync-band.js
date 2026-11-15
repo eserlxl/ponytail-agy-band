@@ -560,7 +560,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   let level = defaultPonytailLevel();
 
   let tests = { state: 'none' };
-  let pendingSyncTestCalls = 0;
+  const pendingRunCmds = [];
   const asyncTestTasks = new Map();
 
   const scorePath = (rawPath, weight, targetMap) => {
@@ -582,7 +582,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   };
 
   const consumeAsyncCompletions = text => {
-    const re = /Task id "([^"]+)" finished with result:\n([\s\S]*?)(?=\n<\/SYSTEM_MESSAGE>|$)/g;
+    const re = /Task id "([^"]+)" finished with result:\n([\s\S]*?)(?=\nTask id "|\n<\/SYSTEM_MESSAGE>|$)/g;
     let m;
     while ((m = re.exec(text)) !== null) {
       if (asyncTestTasks.has(m[1])) {
@@ -644,7 +644,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
           const cwdArg = unwrapArg(args.Cwd);
           if (cwdArg) scorePath(String(cwdArg), 1, cmdFallbackCounts);
           for (const cp of extractCommandPaths(cmd)) scorePath(cp, 1, cmdFallbackCounts);
-          if (TEST_CMD.test(cmd)) pendingSyncTestCalls++;
+          pendingRunCmds.push({ isTest: TEST_CMD.test(cmd), cmd });
         } else {
           const weight = tc.name === 'edit_file' || tc.name === 'write_file' ? 5 : 1;
           for (const key of ['Path', 'SearchPath', 'DirectoryPath', 'Cwd']) {
@@ -665,13 +665,15 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
       const content = String(r.content || '');
       const bg = /Tool is running as a background task with task id:\s*([^\s]+)\nTask Description:\s*([^\n]+)/.exec(content);
       if (bg) {
-        if (TEST_CMD.test(bg[2])) {
-          asyncTestTasks.set(bg[1].trim(), bg[2]);
+        const entry = pendingRunCmds.shift();
+        if (entry?.isTest || TEST_CMD.test(bg[2])) {
+          asyncTestTasks.set(bg[1].trim(), entry?.cmd || bg[2]);
         }
-        if (pendingSyncTestCalls > 0) pendingSyncTestCalls--;
-      } else if (pendingSyncTestCalls > 0 && /Command exited with code \d+/.test(content)) {
-        tests = applyTestOutput(tests, content);
-        pendingSyncTestCalls--;
+      } else if (/Command exited with code \d+/.test(content)) {
+        const entry = pendingRunCmds.shift();
+        if (entry?.isTest) {
+          tests = applyTestOutput(tests, content);
+        }
       }
       if (content.includes('Task id "')) {
         consumeAsyncCompletions(content);
