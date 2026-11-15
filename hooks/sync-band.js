@@ -532,6 +532,26 @@ function discoverChildIds(transcriptPath, selfId) {
   return [...children];
 }
 
+function modelAtTime(timeline, ts, fallbackModel) {
+  let picked = timeline[0] ? timeline[0].model : fallbackModel;
+  if (!Number.isFinite(ts)) return picked || fallbackModel;
+  for (const entry of timeline) {
+    if (!Number.isFinite(entry.t) || entry.t <= ts) picked = entry.model;
+    else break;
+  }
+  return picked;
+}
+
+function updatePhaseFromTools(toolCalls, inExec) {
+  let next = inExec;
+  for (const tc of toolCalls) {
+    if (!tc || !tc.name) continue;
+    if (tc.name === 'exit_plan_mode') next = true;
+    else if (tc.name === 'enter_plan_mode') next = false;
+  }
+  return next;
+}
+
 function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = [], options = {}) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
   const gitCache = options.gitCache || new Map();
@@ -546,6 +566,7 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   let currentModel = meta.modelName && !['auto', 'none'].includes(String(meta.modelName).trim().toLowerCase())
     ? String(meta.modelName).trim()
     : '';
+  const modelTimeline = [{ t: Number.NEGATIVE_INFINITY, model: currentModel }];
   let inExecPhase = false;
   const modelReplyCounts = {};
 
@@ -558,6 +579,21 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   let firstHumanName = '';
   let startedMs = NaN;
   let level = defaultPonytailLevel();
+
+  const billStep = (rec, model, inExec, trackDominant) => {
+    const inp = rec.input_tokens || 0;
+    const cr = rec.cache_read_tokens || 0;
+    const out = rec.output_tokens || 0;
+    if (inp + cr + out <= 0) return;
+    tokensTotal += inp + cr + out;
+    tokensOutput += out;
+    if (trackDominant && model) {
+      modelReplyCounts[model] = (modelReplyCounts[model] || 0) + 1;
+    }
+    const c = estimateStepCost(model, inExec, inp, cr, out, ponytailDir);
+    if (c === null) anyUnpriced = true;
+    else totalCost += c;
+  };
 
   let tests = { state: 'none' };
   const pendingRunCmds = [];
@@ -602,7 +638,10 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
       inExecPhase = false;
       const content = String(r.content || '');
       const switched = detectModelChange(content);
-      if (switched) currentModel = switched;
+      if (switched) {
+        currentModel = switched;
+        modelTimeline.push({ t: Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY, model: currentModel });
+      }
       if (!firstHumanName) firstHumanName = extractPromptTitle(content);
 
       const promptLower = extractRawPromptText(content).toLowerCase();
@@ -617,29 +656,14 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
 
     if (r.type === 'PLANNER_RESPONSE' || r.type === 'CHECKPOINT') {
       if (r.type === 'PLANNER_RESPONSE') hasReply = true;
-      const inp = r.input_tokens || 0;
-      const cr = r.cache_read_tokens || 0;
-      const out = r.output_tokens || 0;
-      if (inp + cr + out > 0) {
-        tokensTotal += inp + cr + out;
-        tokensOutput += out;
-        if (currentModel) {
-          modelReplyCounts[currentModel] = (modelReplyCounts[currentModel] || 0) + 1;
-        }
-        const c = estimateStepCost(currentModel, inExecPhase, inp, cr, out, ponytailDir);
-        if (c === null) anyUnpriced = true;
-        else totalCost += c;
-      }
+      billStep(r, currentModel, inExecPhase, true);
 
       const tcs = Array.isArray(r.tool_calls) ? r.tool_calls : [];
+      inExecPhase = updatePhaseFromTools(tcs, inExecPhase);
       for (const tc of tcs) {
-        if (!tc || !tc.name) continue;
+        if (!tc || !tc.name || tc.name === 'exit_plan_mode' || tc.name === 'enter_plan_mode') continue;
         const args = tc.args && typeof tc.args === 'object' ? tc.args : {};
-        if (tc.name === 'exit_plan_mode') {
-          inExecPhase = true;
-        } else if (tc.name === 'enter_plan_mode') {
-          inExecPhase = false;
-        } else if (tc.name === 'run_command') {
+        if (tc.name === 'run_command') {
           const cmd = String(unwrapArg(args.CommandLine) || '');
           const cwdArg = unwrapArg(args.Cwd);
           if (cwdArg) scorePath(String(cwdArg), 1, cmdFallbackCounts);
@@ -693,9 +717,13 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
   // Include child subagent transcripts in token and estimated cost totals.
   for (const childPath of childTranscriptPaths || []) {
     if (!childPath || !fs.existsSync(childPath)) continue;
-    let subModel = currentModel;
+    let subModel;
     let subExec = false;
     streamJsonl(childPath, sr => {
+      const st = sr.created_at ? Date.parse(sr.created_at) : NaN;
+      if (subModel === undefined && Number.isFinite(st)) {
+        subModel = modelAtTime(modelTimeline, st, currentModel);
+      }
       if (sr.type === 'USER_INPUT') {
         subExec = false;
         const switched = detectModelChange(String(sr.content || ''));
@@ -704,19 +732,10 @@ function parseAgyTranscript(transcriptPath, meta = {}, childTranscriptPaths = []
         subExec = false;
       }
       if (sr.type === 'PLANNER_RESPONSE' || sr.type === 'CHECKPOINT') {
-        const inp = sr.input_tokens || 0;
-        const cr = sr.cache_read_tokens || 0;
-        const out = sr.output_tokens || 0;
-        if (inp + cr + out > 0) {
-          tokensTotal += inp + cr + out;
-          tokensOutput += out;
-          const c = estimateStepCost(subModel, subExec, inp, cr, out, ponytailDir);
-          if (c === null) anyUnpriced = true;
-          else totalCost += c;
-        }
-        if (Array.isArray(sr.tool_calls) && sr.tool_calls.some(tc => tc && tc.name === 'exit_plan_mode')) {
-          subExec = true;
-        }
+        if (subModel === undefined) subModel = currentModel;
+        billStep(sr, subModel, subExec, false);
+        const tcs = Array.isArray(sr.tool_calls) ? sr.tool_calls : [];
+        subExec = updatePhaseFromTools(tcs, subExec);
       }
     });
   }

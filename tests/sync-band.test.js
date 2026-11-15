@@ -859,3 +859,78 @@ test('csvField quotes bare carriage returns so RFC-4180 CSV round-trip preserves
   assert.equal(payload.tasks.length, 1);
   assert.equal(payload.tasks[0].name, taskName);
 });
+
+test('child subagents inherit spawn-time model across parent model switches and honor enter_plan_mode', t => {
+  const tmp = makeTmpDir('pw-agy-submodel-');
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ponytailDir = makePonytailFixture(tmp);
+
+  const parentPath = path.join(tmp, 'parent.jsonl');
+  const childPath = path.join(tmp, 'child.jsonl');
+
+  writeJsonl(parentPath, [
+    {
+      step_index: 0,
+      source: 'USER_EXPLICIT',
+      type: 'USER_INPUT',
+      created_at: '2026-11-15T10:00:00Z',
+      content:
+        '<USER_REQUEST>\nSwitch model mid-session\n</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Orchestrator (Carbon).\n</USER_SETTINGS_CHANGE>',
+    },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:00Z',
+      tool_calls: [{ name: 'invoke_subagent', args: {} }],
+    },
+    {
+      step_index: 2,
+      source: 'USER_EXPLICIT',
+      type: 'USER_INPUT',
+      created_at: '2026-11-15T10:05:00Z',
+      content:
+        '<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Orchestrator (Carbon) to auto.\n</USER_SETTINGS_CHANGE>',
+    },
+    {
+      step_index: 3,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:05:05Z',
+      tool_calls: [],
+    },
+  ]);
+
+  writeJsonl(childPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-11-15T10:01:01Z', content: 'sub' },
+    {
+      step_index: 1,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:02Z',
+      tool_calls: [{ name: 'exit_plan_mode', args: {} }],
+    },
+    {
+      step_index: 2,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:03Z',
+      tool_calls: [{ name: 'enter_plan_mode', args: {} }],
+    },
+    {
+      step_index: 3,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-15T10:01:04Z',
+      input_tokens: 1_000_000,
+      cache_read_tokens: 0,
+      output_tokens: 0,
+      tool_calls: [],
+    },
+  ]);
+
+  const stats = parseAgyTranscript(parentPath, {}, [childPath], { ponytailDir, allowTempWorkspaces: true });
+  assert.ok(stats);
+  assert.equal(stats.model, 'Agy');
+  assert.ok(stats.costUsd !== null && Math.abs(stats.costUsd - 2.0) < 1e-6, `expected $2.00 got ${stats.costUsd}`);
+});
