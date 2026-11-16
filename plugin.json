@@ -1,6 +1,6 @@
 {
   "name": "ponytail-agy-band",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Syncs Antigravity (agy) sessions, tokens, agent time, test status, and estimated API costs into Ponytail's local Board (~/.config/ponytail/band/board.html).",
   "logo": "assets/logo.svg",
   "author": {

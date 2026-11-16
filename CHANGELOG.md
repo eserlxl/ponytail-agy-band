@@ -4,6 +4,8 @@ All notable changes to `ponytail-agy-band` are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
 ### Added
 - Incremental stat-validated transcript caching (`.agy-import-cache.json`) for `importAllBrains` / `--import`, plus `--force` rebuild option.
 - Stale atomic write temporary file cleanup (`sweepStaleTempFiles`) inside `withLedgerLock` and `PONYTAIL_LOCK_TIMEOUT_MS` lock timeout override.
