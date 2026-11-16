@@ -19,6 +19,7 @@ Contributions to `ponytail-agy-band` are welcome under the terms of the [GNU Gen
    agy plugin validate .
    ```
 4. **No user-specific paths:** keep absolute local home paths out of tracked files (use `os.homedir()` or `~/` in docs); CI verifies this automatically.
+5. **Bump versions in lockstep:** use `./scripts/bump-version.sh <major|minor|patch|X.Y.Z> [--dry-run] [--gate]` when cutting a release so `plugin.json`, `package.json`, and `CHANGELOG.md` stay synchronized.
 
 ## Pull Requests
 

@@ -2111,3 +2111,222 @@ test('Chain A regressions: empty brainDirs, non-object JSON recovery, child CSV 
   assert.equal(humanStatus.status, 0, humanStatus.stderr);
   assert.ok(humanStatus.stdout.includes('boardCompileError:'));
 });
+
+test('manifest versions stay in lockstep and scripts/bump-version.sh handles bumps, dry-run, guards, and --gate', () => {
+  const BUMP_SCRIPT = path.join(PLUGIN_ROOT, 'scripts', 'bump-version.sh');
+  const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+  // 1. Repository manifest lockstep check.
+  const repoPkg = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'package.json'), 'utf8'));
+  const repoPlugin = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'plugin.json'), 'utf8'));
+  assert.match(repoPkg.version, SEMVER_RE);
+  assert.match(repoPlugin.version, SEMVER_RE);
+  assert.equal(repoPlugin.version, repoPkg.version, 'plugin.json and package.json must stay at the same version');
+
+  const tmp = makeTmpDir('ponytail-agy-bump-');
+  let seq = 0;
+
+  function makeFixture({
+    pluginVersion = '0.1.0',
+    pkgVersion = '0.1.0',
+    testScript = 'node -e "process.exit(0)"',
+    changelog = [
+      '# Changelog',
+      '',
+      '## [Unreleased]',
+      '',
+      '### Added',
+      '- Draft feature',
+      '',
+      '## [0.1.0] - 2026-11-15',
+      '',
+      '### Added',
+      '- Initial release',
+      '',
+    ].join('\n'),
+  } = {}) {
+    const dir = path.join(tmp, `fx-${++seq}`);
+    fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+    const scriptPath = path.join(dir, 'scripts', 'bump-version.sh');
+    fs.copyFileSync(BUMP_SCRIPT, scriptPath);
+    fs.chmodSync(scriptPath, 0o755);
+    fs.writeFileSync(
+      path.join(dir, 'plugin.json'),
+      JSON.stringify({ name: 'demo', version: pluginVersion }, null, 2) + '\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'demo', version: pkgVersion, scripts: { test: testScript } }, null, 2) + '\n',
+      'utf8',
+    );
+    if (Buffer.isBuffer(changelog)) {
+      fs.writeFileSync(path.join(dir, 'CHANGELOG.md'), changelog);
+    } else {
+      fs.writeFileSync(path.join(dir, 'CHANGELOG.md'), changelog, 'utf8');
+    }
+    return {
+      dir,
+      scriptPath,
+      run: (args, extraEnv = {}) =>
+        spawnSync(scriptPath, args, {
+          cwd: dir,
+          encoding: 'utf8',
+          env: { ...process.env, ...extraEnv },
+          timeout: 15000,
+        }),
+      readState: () => ({
+        pluginRaw: fs.readFileSync(path.join(dir, 'plugin.json'), 'utf8'),
+        pkgRaw: fs.readFileSync(path.join(dir, 'package.json'), 'utf8'),
+        changelogRaw: fs.readFileSync(path.join(dir, 'CHANGELOG.md')),
+      }),
+    };
+  }
+
+  try {
+    // 2. Help & CLI/validation rejections.
+    for (const flag of ['--help', '-h']) {
+      const fx = makeFixture();
+      const res = fx.run([flag]);
+      assert.equal(res.status, 0, res.stderr);
+      assert.match(res.stdout, /Usage:/);
+    }
+
+    const rejectCases = [
+      { args: [], setup: {} },
+      { args: ['--unknown'], setup: {} },
+      { args: ['patch', '-m'], setup: {} },
+      { args: ['patch', '-m', ''], setup: {} },
+      { args: ['patch', 'minor'], setup: {} },
+      { args: ['1.2'], setup: {} },
+      { args: ['0.1.0'], setup: {} },
+      { args: ['0.0.9'], setup: {} },
+      { args: ['0.1.0-rc.1'], setup: {} },
+      {
+        args: ['0.2.0'],
+        setup: {
+          changelog: '# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-11-16\n\n## [0.1.0] - 2026-11-15\n',
+        },
+      },
+      { args: ['patch'], setup: { changelog: Buffer.from([0xff, 0xfe, 0x0a]) } },
+      { args: ['patch'], setup: { pluginVersion: '0.1.0', pkgVersion: '0.1.1' } },
+    ];
+    for (const tc of rejectCases) {
+      const fx = makeFixture(tc.setup);
+      const before = fx.readState();
+      const res = fx.run(tc.args);
+      assert.equal(res.status, 1, `expected exit 1 for ${JSON.stringify(tc.args)}, got ${res.status}: ${res.stdout}`);
+      const after = fx.readState();
+      assert.equal(after.pluginRaw, before.pluginRaw);
+      assert.equal(after.pkgRaw, before.pkgRaw);
+      assert.equal(Buffer.compare(after.changelogRaw, before.changelogRaw), 0);
+    }
+
+    // Explicit target repairs mismatched plugin.json / package.json versions into lockstep.
+    const driftFx = makeFixture({ pluginVersion: '0.1.0', pkgVersion: '0.1.1' });
+    const driftRes = driftFx.run(['0.2.0']);
+    assert.equal(driftRes.status, 0, driftRes.stderr);
+    assert.equal(JSON.parse(driftFx.readState().pluginRaw).version, '0.2.0');
+    assert.equal(JSON.parse(driftFx.readState().pkgRaw).version, '0.2.0');
+
+    // 3. --dry-run and Keep-a-Changelog splice modes.
+    const spliceFx = makeFixture();
+    const beforeDry = spliceFx.readState();
+    const dryRes = spliceFx.run(['--dry-run', 'minor']);
+    assert.equal(dryRes.status, 0, dryRes.stderr);
+    assert.match(dryRes.stdout, /dry-run: 0\.1\.0 -> 0\.2\.0/);
+    assert.match(dryRes.stdout, /Would add to CHANGELOG\.md:/);
+    assert.equal(spliceFx.readState().pluginRaw, beforeDry.pluginRaw);
+    assert.equal(spliceFx.readState().pkgRaw, beforeDry.pkgRaw);
+    assert.equal(Buffer.compare(spliceFx.readState().changelogRaw, beforeDry.changelogRaw), 0);
+
+    // minor rolls drafted [Unreleased] notes into 0.2.0 while leaving ## [Unreleased] on top.
+    const minorRes = spliceFx.run(['minor']);
+    assert.equal(minorRes.status, 0, minorRes.stderr);
+    assert.equal(JSON.parse(spliceFx.readState().pluginRaw).version, '0.2.0');
+    assert.equal(JSON.parse(spliceFx.readState().pkgRaw).version, '0.2.0');
+    const clAfterMinor = spliceFx.readState().changelogRaw.toString('utf8');
+    assert.match(
+      clAfterMinor,
+      /## \[Unreleased\]\n\n## \[0\.2\.0\] - \d{4}-\d{2}-\d{2}\n\n### Added\n- Draft feature\n\n## \[0\.1\.0\]/,
+    );
+
+    // patch -m joins an existing drafted ### Changed section.
+    fs.writeFileSync(
+      path.join(spliceFx.dir, 'CHANGELOG.md'),
+      clAfterMinor.replace(
+        '## [Unreleased]\n',
+        '## [Unreleased]\n\n### Changed\n- Existing change\n',
+      ),
+      'utf8',
+    );
+    const patchRes = spliceFx.run(['patch', '-m', 'Tighten lock handling']);
+    assert.equal(patchRes.status, 0, patchRes.stderr);
+    assert.equal(JSON.parse(spliceFx.readState().pluginRaw).version, '0.2.1');
+    const clAfterPatch = spliceFx.readState().changelogRaw.toString('utf8');
+    assert.match(
+      clAfterPatch,
+      /## \[Unreleased\]\n\n## \[0\.2\.1\] - \d{4}-\d{2}-\d{2}\n\n### Changed\n- Tighten lock handling\n- Existing change/,
+    );
+
+    // major on empty [Unreleased] falls back to Version bump. with warning.
+    const majorRes = spliceFx.run(['major']);
+    assert.equal(majorRes.status, 0, majorRes.stderr);
+    assert.match(majorRes.stderr, /Version bump\./);
+    assert.equal(JSON.parse(spliceFx.readState().pluginRaw).version, '1.0.0');
+    assert.equal(JSON.parse(spliceFx.readState().pkgRaw).version, '1.0.0');
+    assert.match(
+      spliceFx.readState().changelogRaw.toString('utf8'),
+      /## \[1\.0\.0\] - \d{4}-\d{2}-\d{2}\n\n### Changed\n- Version bump\./,
+    );
+
+    // Pre-release progression: 1.0.1-rc.1 -> 1.0.1-rc.2 -> 1.0.1.
+    const preFx = makeFixture({ pluginVersion: '1.0.0', pkgVersion: '1.0.0' });
+    assert.equal(preFx.run(['1.0.1-rc.1', '-m', 'RC 1']).status, 0);
+    assert.equal(preFx.run(['1.0.1-rc.2', '-m', 'RC 2']).status, 0);
+    assert.equal(preFx.run(['1.0.1', '-m', 'Final 1.0.1']).status, 0);
+    assert.equal(JSON.parse(preFx.readState().pluginRaw).version, '1.0.1');
+    assert.equal(JSON.parse(preFx.readState().pkgRaw).version, '1.0.1');
+
+    // 4. Dirty git worktree guard & ALLOW_DIRTY=1.
+    const gitFx = makeFixture();
+    fs.writeFileSync(path.join(gitFx.dir, 'notes.txt'), 'clean\n', 'utf8');
+    for (const gitArgs of [
+      ['init'],
+      ['config', 'user.email', 'test@example.com'],
+      ['config', 'user.name', 'Test User'],
+      ['add', '.'],
+      ['commit', '--no-gpg-sign', '-m', 'initial'],
+    ]) {
+      const gr = spawnSync('git', gitArgs, { cwd: gitFx.dir, encoding: 'utf8' });
+      assert.equal(gr.status, 0, gr.stderr);
+    }
+    fs.writeFileSync(path.join(gitFx.dir, 'notes.txt'), 'dirty\n', 'utf8');
+    const beforeDirty = gitFx.readState();
+    const dirtyFail = gitFx.run(['patch']);
+    assert.equal(dirtyFail.status, 1);
+    assert.match(dirtyFail.stderr, /Working tree not clean/);
+    assert.equal(gitFx.readState().pluginRaw, beforeDirty.pluginRaw);
+
+    const dirtyOk = gitFx.run(['patch', '-m', 'Allow dirty'], { ALLOW_DIRTY: '1' });
+    assert.equal(dirtyOk.status, 0, dirtyOk.stderr);
+    assert.equal(JSON.parse(gitFx.readState().pluginRaw).version, '0.1.1');
+    assert.equal(JSON.parse(gitFx.readState().pkgRaw).version, '0.1.1');
+
+    // 5. --gate preflight blocks failing tests and allows passing tests.
+    const failGateFx = makeFixture({ testScript: 'node -e "process.exit(1)"' });
+    const beforeFailGate = failGateFx.readState();
+    const failGateRes = failGateFx.run(['patch', '--gate'], { SKIP_AGY_VALIDATE: '1' });
+    assert.equal(failGateRes.status, 1);
+    assert.match(failGateRes.stderr, /gate failed/);
+    assert.equal(failGateFx.readState().pluginRaw, beforeFailGate.pluginRaw);
+
+    const passGateFx = makeFixture({ testScript: 'node -e "process.exit(0)"' });
+    const passGateRes = passGateFx.run(['patch', '--gate', '-m', 'Gated bump'], { SKIP_AGY_VALIDATE: '1' });
+    assert.equal(passGateRes.status, 0, passGateRes.stderr);
+    assert.equal(JSON.parse(passGateFx.readState().pluginRaw).version, '0.1.1');
+    assert.equal(JSON.parse(passGateFx.readState().pkgRaw).version, '0.1.1');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

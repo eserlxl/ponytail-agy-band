@@ -11,6 +11,7 @@ All notable changes to `ponytail-agy-band` are documented in this file.
 - CLI `--import` options `--project <name>` (repeatable project filter) and `--json` (machine-readable summary output), plus strict CLI flag/mode validation (`parseCliArgs`) exiting fast with exit code `2` and stderr hint on unknown flags, positional args, `--option=value` syntax, missing values, `--status` combined with `--force`/`--project`, or conflicting modes (`--help` precedence preserved), and synchronous CLI output flushing before exit.
 - Support for hook `customLabel`/`title` session naming persisted across `Stop` and `--import`, plus `PONYTAIL_AGY_BRAIN_DIRS` environment override.
 - `README.md` `Troubleshooting` runbook, CLI exit code documentation, and `PONYTAIL_AGY_ALLOW_TEMP` environment table entry aligned with `skills/ponytail-agy-import/SKILL.md`.
+- Release helper script [`scripts/bump-version.sh`](./scripts/bump-version.sh) (`major|minor|patch|X.Y.Z`, `-m`/`--message`, `--dry-run`, `--gate`) to bump `plugin.json`, `package.json`, and `CHANGELOG.md` versions atomically in lockstep.
 
 ### Fixed
 - `inspectBandStatus` and `importAllBrains` honor explicit empty `brainDirs: []` arrays instead of falling back to default brain directories or treating empty scans as global pruning sweeps.
